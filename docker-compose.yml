@@ -1,0 +1,17 @@
+# enl 実行用。3610 専有 + マルチキャスト受信のため host network 必須。
+# (bridge だと 3610 応答 / 224.0.23.0 マルチキャストを受信できない)
+#
+# 例:
+#   docker compose run --rm enl discover
+#   docker compose run --rm enl get 192.0.2.10 013001 80
+#   RUST_LOG=debug docker compose run --rm enl describe 192.0.2.10 013001
+
+services:
+  enl:
+    build:
+      context: .
+      target: runtime
+    image: enl:latest
+    network_mode: host
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
