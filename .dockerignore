@@ -1,0 +1,7 @@
+target/
+.git/
+.gitignore
+*.md
+.claude/
+docker-compose.yml
+Makefile
