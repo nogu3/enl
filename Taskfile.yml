@@ -1,0 +1,132 @@
+# enl タスクランナー。
+#
+#   task                 タスク一覧
+#   task build           ローカル release ビルド (要 Rust toolchain)
+#   task run -- discover  ビルド済バイナリで enl を実行
+#   task test            ローカルテスト
+#   task docker:test     Docker 上でテスト (ローカル toolchain 不要)
+#
+# ローカル系は host の cargo を使う。docker: 系はコンテナ内で完結する。
+version: '3'
+
+vars:
+  BIN: ./target/release/enl
+  BIN_DEBUG: ./target/debug/enl
+  # Docker 開発イメージ。ローカルに Rust が無くても docker: 系で全部回る。
+  DEV_IMAGE: rust:1-bookworm
+  WORK: /app
+  # 依存ビルドキャッシュを名前付きボリュームで永続化
+  DEV_RUN: >-
+    docker run --rm
+    -v {{.PWD}}:{{.WORK}}
+    -v enl-cargo-registry:/usr/local/cargo/registry
+    -v enl-target:{{.WORK}}/target
+    -w {{.WORK}}
+    {{.DEV_IMAGE}}
+
+tasks:
+  default:
+    desc: タスク一覧
+    cmds:
+      - task --list
+    silent: true
+
+  # ───── ローカル (要 Rust toolchain) ─────
+
+  build:
+    desc: release ビルド (最適化バイナリ → target/release/enl)
+    cmds:
+      - cargo build --release
+    sources:
+      - src/**/*.rs
+      - Cargo.toml
+      - Cargo.lock
+    generates:
+      - '{{.BIN}}'
+
+  build:debug:
+    desc: debug ビルド (高速 / 最適化なし)
+    cmds:
+      - cargo build
+    sources:
+      - src/**/*.rs
+      - Cargo.toml
+      - Cargo.lock
+    generates:
+      - '{{.BIN_DEBUG}}'
+
+  run:
+    desc: 'ビルド済バイナリで enl 実行。例: task run -- discover'
+    deps: [build]
+    cmds:
+      - '{{.BIN}} {{.CLI_ARGS}}'
+
+  test:
+    desc: テスト (codec ラウンドトリップ等)
+    cmds:
+      - cargo test
+
+  clippy:
+    desc: lint (warning を error 扱い)
+    cmds:
+      - cargo clippy -- -D warnings
+
+  fmt:
+    desc: フォーマット適用
+    cmds:
+      - cargo fmt
+
+  fmt:check:
+    desc: フォーマット差分チェック (CI 向け)
+    cmds:
+      - cargo fmt --check
+
+  check:
+    desc: CI 相当の全チェック (fmt + clippy + test)
+    cmds:
+      - task: fmt:check
+      - task: clippy
+      - task: test
+
+  clean:
+    desc: ビルド成果物削除
+    cmds:
+      - cargo clean
+
+  # ───── Docker (ローカル toolchain 不要) ─────
+
+  docker:test:
+    desc: Docker 上でテスト
+    cmds:
+      - '{{.DEV_RUN}} cargo test'
+
+  docker:clippy:
+    desc: Docker 上で clippy
+    cmds:
+      - '{{.DEV_RUN}} sh -c "rustup component add clippy >/dev/null 2>&1; cargo clippy -- -D warnings"'
+
+  docker:fmt:
+    desc: Docker 上で fmt
+    cmds:
+      - '{{.DEV_RUN}} sh -c "rustup component add rustfmt >/dev/null 2>&1; cargo fmt"'
+
+  docker:build:
+    desc: 実行イメージをビルド (enl:latest)
+    cmds:
+      - docker compose build
+
+  docker:run:
+    desc: 'Docker (host network) で enl 実行。例: task docker:run -- discover'
+    deps: [docker:build]
+    cmds:
+      - docker compose run --rm enl {{.CLI_ARGS}}
+
+  docker:shell:
+    desc: Docker 開発シェル
+    cmds:
+      - '{{.DEV_RUN}} bash'
+
+  docker:clean:
+    desc: 名前付きキャッシュボリューム削除
+    cmds:
+      - docker volume rm -f enl-cargo-registry enl-target
