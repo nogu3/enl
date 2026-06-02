@@ -37,7 +37,7 @@ task docker:run -- discover         # host network で enl 実行
 - `discover [--timeout-ms 3000]` — `{"devices":[{"ip","count","instances":[...]}]}`
 - `get <ip> <eoj> <epc...> [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","name?","pdc","edt_hex","value?"}]}`
 - `set <ip> <eoj> <epc> <edt> [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted","properties":[...]}`
-- `describe <ip> <eoj> [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[{"epc","name?"}],"set_map":[...],"inf_map":[...]}`
+- `describe <ip> <eoj> [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[{"epc","name?","values?"}],"set_map":[...],"inf_map":[...]}`。`values` は enum 型 EPC の取りうる値域 (`{"41":"open","42":"close",...}`)。数値型・未対応 EPC には付かない。
 - `raw <ip> <deoj> <esv> [epc[:edt]...] [--seoj 05FF01] [--timeout-ms 2000]` — 任意 ESV/EPC/EDT を生送信。`{"ip","sent_hex","response_hex","frame?":{...}}`。SNA もエラーにせず `response_hex` を返す（デバッグ / 未対応操作の逃げ道）。応答パース失敗時は `parse_error` を併記。
 
 ```bash

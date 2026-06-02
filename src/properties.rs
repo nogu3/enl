@@ -9,9 +9,12 @@ use serde_json::{json, Value};
 /// EDT を可能ならデコードして付加情報の JSON 値を返す。
 /// デコードできなければ None (呼び出し側は edt_hex のみ出す)。
 pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
+    // enum 型 (共通 power + クラス固有) は値域テーブルを単一ソースに解釈する。
+    if let Some(p) = enum_prop(eoj, epc) {
+        return Some(decode_enum(p, edt));
+    }
     // スーパークラス共通 EPC (全機器)
     match epc {
-        0x80 => return Some(decode_on_off(edt)),
         0x82 => return decode_version(eoj, edt),
         0x8A => return decode_manufacturer(edt),
         0x9D..=0x9F => return parse_property_map(edt).map(
@@ -36,6 +39,97 @@ pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
         }
     }
     None
+}
+
+/// enum 型 EPC の値域定義。decode の値解釈と describe の values 列挙の単一ソース。
+/// ここに 1 度書けば「値→意味」(decode) と「意味の候補一覧」(describe) の両方が出る。
+struct EnumProp {
+    epc: u8,
+    /// デコード時の JSON キー (例 "operation_mode")。
+    key: &'static str,
+    /// (バイト値, 意味) の対応。
+    values: &'static [(u8, &'static str)],
+}
+
+/// 全機器共通 (スーパークラス) の enum 型 EPC。
+const COMMON_ENUM: &[EnumProp] = &[EnumProp {
+    epc: 0x80,
+    key: "power",
+    values: &[(0x30, "on"), (0x31, "off")],
+}];
+
+/// 家庭用エアコン (0x0130) 固有の enum 型 EPC。
+const AIRCON_ENUM: &[EnumProp] = &[EnumProp {
+    epc: 0xB0,
+    key: "operation_mode",
+    values: &[
+        (0x41, "auto"),
+        (0x42, "cool"),
+        (0x43, "heat"),
+        (0x44, "dry"),
+        (0x45, "fan"),
+        (0x40, "other"),
+    ],
+}];
+
+/// 電動雨戸・シャッター (0x0263) 固有の enum 型 EPC。
+const SHUTTER_ENUM: &[EnumProp] = &[
+    EnumProp {
+        epc: 0xE0,
+        key: "operation",
+        values: &[(0x41, "open"), (0x42, "close"), (0x43, "stop")],
+    },
+    EnumProp {
+        epc: 0xEA,
+        key: "state",
+        values: &[
+            (0x41, "fully_open"),
+            (0x42, "fully_closed"),
+            (0x43, "opening"),
+            (0x44, "closing"),
+            (0x45, "stopped_midway"),
+        ],
+    },
+];
+
+/// EOJ のクラスに対応する enum 型 EPC テーブル。未対応クラスは空。
+fn class_enum_table(eoj: Eoj) -> &'static [EnumProp] {
+    match (eoj.class_group(), eoj.class()) {
+        (0x01, 0x30) => AIRCON_ENUM,
+        (0x02, 0x63) => SHUTTER_ENUM,
+        _ => &[],
+    }
+}
+
+/// EPC に対応する enum 値域定義。クラス固有を優先し、無ければ共通から引く。
+fn enum_prop(eoj: Eoj, epc: u8) -> Option<&'static EnumProp> {
+    class_enum_table(eoj)
+        .iter()
+        .chain(COMMON_ENUM)
+        .find(|p| p.epc == epc)
+}
+
+/// enum EDT を {key: 意味} にデコード。未知バイトは "unknown"。
+fn decode_enum(p: &EnumProp, edt: &[u8]) -> Value {
+    let meaning = edt
+        .first()
+        .and_then(|b| p.values.iter().find(|(v, _)| v == b).map(|(_, m)| *m))
+        .unwrap_or("unknown");
+    let mut obj = serde_json::Map::new();
+    obj.insert(p.key.to_string(), json!(meaning));
+    Value::Object(obj)
+}
+
+/// enum 型 EPC の値域 (バイト hex → 意味) を JSON で返す。describe の values 用。
+/// 数値型・未対応 EPC は None。
+pub fn epc_values(eoj: Eoj, epc: u8) -> Option<Value> {
+    enum_prop(eoj, epc).map(|p| {
+        let mut obj = serde_json::Map::new();
+        for (v, m) in p.values {
+            obj.insert(format!("{v:02X}"), json!(m));
+        }
+        Value::Object(obj)
+    })
 }
 
 /// 0x82 規格Version情報。
@@ -111,21 +205,9 @@ fn manufacturer_name(code: u32) -> Option<&'static str> {
     })
 }
 
-/// 家庭用エアコン (0x0130) 固有 EPC のデコード。
+/// 家庭用エアコン (0x0130) 固有の数値型 EPC のデコード (enum 型は enum_prop 経由)。
 fn decode_aircon(epc: u8, edt: &[u8]) -> Option<Value> {
     match epc {
-        // 0xB0 運転モード設定: 自動/冷房/暖房/除湿/送風/その他
-        0xB0 => Some(json!({
-            "operation_mode": match edt.first() {
-                Some(0x41) => "auto",
-                Some(0x42) => "cool",
-                Some(0x43) => "heat",
-                Some(0x44) => "dry",
-                Some(0x45) => "fan",
-                Some(0x40) => "other",
-                _ => "unknown",
-            }
-        })),
         // 0xB3 温度設定値: unsigned ℃ (0x00-0x32)、0xFD=設定値不明
         0xB3 => edt.first().map(|&v| match v {
             0xFD => json!({ "temp_setpoint_c": Value::Null }),
@@ -143,41 +225,12 @@ fn decode_aircon(epc: u8, edt: &[u8]) -> Option<Value> {
     }
 }
 
-/// 電動雨戸・シャッター (0x0263) 固有 EPC のデコード。
+/// 電動雨戸・シャッター (0x0263) 固有の数値型 EPC のデコード (enum 型は enum_prop 経由)。
 fn decode_shutter(epc: u8, edt: &[u8]) -> Option<Value> {
     match epc {
-        // 0xE0 開閉動作設定: 開=0x41 / 閉=0x42 / 停止=0x43
-        0xE0 => Some(json!({
-            "operation": match edt.first() {
-                Some(0x41) => "open",
-                Some(0x42) => "close",
-                Some(0x43) => "stop",
-                _ => "unknown",
-            }
-        })),
         // 0xE1 開度レベル設定: 0x00-0x64 (0-100%)
         0xE1 => edt.first().map(|&v| json!({ "open_level_percent": v })),
-        // 0xEA 開閉状態: 全開/全閉/開動作中/閉動作中/途中停止
-        0xEA => Some(json!({
-            "state": match edt.first() {
-                Some(0x41) => "fully_open",
-                Some(0x42) => "fully_closed",
-                Some(0x43) => "opening",
-                Some(0x44) => "closing",
-                Some(0x45) => "stopped_midway",
-                _ => "unknown",
-            }
-        })),
         _ => None,
-    }
-}
-
-/// 0x80 動作状態: 0x30=ON / 0x31=OFF。
-fn decode_on_off(edt: &[u8]) -> Value {
-    match edt.first() {
-        Some(0x30) => json!({ "power": "on" }),
-        Some(0x31) => json!({ "power": "off" }),
-        _ => json!({ "power": "unknown" }),
     }
 }
 
@@ -504,6 +557,36 @@ mod tests {
         // name → epc → name の往復
         let epc = epc_for_name(aircon, "room_temperature").unwrap();
         assert_eq!(epc_name(aircon, epc), Some("room_temperature"));
+    }
+
+    #[test]
+    fn epc_values_enum_only() {
+        let shutter = Eoj([0x02, 0x63, 1]);
+        let aircon = Eoj([0x01, 0x30, 1]);
+        // enum 型は値域辞書を返す
+        let v = epc_values(shutter, 0xE0).unwrap();
+        assert_eq!(v["41"], "open");
+        assert_eq!(v["42"], "close");
+        assert_eq!(v["43"], "stop");
+        // 共通 power
+        assert_eq!(epc_values(aircon, 0x80).unwrap()["30"], "on");
+        // 数値型 (開度%・温度) は None
+        assert!(epc_values(shutter, 0xE1).is_none());
+        assert!(epc_values(aircon, 0xB3).is_none());
+        // 未対応 EPC は None
+        assert!(epc_values(shutter, 0x77).is_none());
+    }
+
+    #[test]
+    fn enum_decode_matches_values_catalog() {
+        // 単一ソース担保: epc_values の各エントリを decode に通すと同じ意味が出る
+        let shutter = Eoj([0x02, 0x63, 1]);
+        let values = epc_values(shutter, 0xEA).unwrap();
+        for (hex, meaning) in values.as_object().unwrap() {
+            let byte = u8::from_str_radix(hex, 16).unwrap();
+            let decoded = decode(shutter, 0xEA, &[byte]).unwrap();
+            assert_eq!(decoded["state"], *meaning);
+        }
     }
 
     #[test]
