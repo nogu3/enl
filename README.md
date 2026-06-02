@@ -51,6 +51,7 @@ enl discover                              # find nodes on the LAN
 enl get 192.0.2.10 013001 80             # read (home AC, 0x80 operation status)
 enl set 192.0.2.10 013001 80 30          # write (turn ON)
 enl describe 192.0.2.10 013001           # introspect the property map
+enl schema get | jq .                    # print a subcommand's output JSON Schema (no network)
 RUST_LOG=debug enl discover              # send diagnostics to stderr
 ```
 
@@ -75,6 +76,8 @@ Every binary value always includes `edt_hex`; `value` is added when the decode d
 enl raw 192.0.2.10 013001 62 80          # raw Get 0x80
 enl raw 192.0.2.10 013001 61 80:30       # raw SetC 0x80=ON
 ```
+
+- `schema [discover|get|set|describe|raw]` — print the JSON Schema (draft 2020-12) of a subcommand's stdout output. Omit the target to get every subcommand keyed by name (`{"discover":{...},"get":{...},...}`). Stateless, no network. The output schema is a stable contract, so LLM function-calling / `jq` can fetch it programmatically.
 
 ## Exit codes
 
@@ -105,6 +108,7 @@ task docker:test   # tests inside Docker (no toolchain needed)
 - `src/properties.rs` — optional decode layer, incl. the property-map parser (two encodings for ≤15 vs ≥16 properties).
 - `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`). `discover` is a CIDR sweep (unicast Get to each host).
 - `src/commands.rs` — discover / get / set / describe / raw.
+- `src/schema.rs` — JSON Schema of each subcommand's stdout output (the `schema` subcommand).
 - `src/error.rs` — machine-readable errors + exit codes.
 - `src/main.rs` — clap CLI.
 
@@ -114,7 +118,7 @@ The core (discover / get / set / describe) is verified against real devices.
 
 - [x] Expanded decode dictionary — `82` spec version, `8A` manufacturer code (major vendors named, unknown ones left as hex), electric shutter `0263`, home AC `0130`. Unknown EPCs still return raw hex.
 - [x] `raw` subcommand — send arbitrary ESV/EPC/EDT, return raw response hex.
-- [ ] Output schema stabilization — don't break across versions, since LLMs / `jq` depend on it.
+- [x] Output schema stabilization — each subcommand's stdout JSON Schema is published via the `schema` subcommand and machine-fetchable, so LLMs / `jq` can pin to it across versions.
 
 ## License
 
