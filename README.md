@@ -45,11 +45,11 @@ task run -- raw 192.0.2.10 013001 62 80          # Get 0x80 を生送信
 task run -- raw 192.0.2.10 013001 61 80:30       # SetC 0x80=ON
 ```
 
-`eoj`/`edt` は hex。`epc` は hex（`80`）でも正規名（`power` / `operation_mode` / `open_close_state` 等）でも指定でき、名前はクラス固有を優先して解決する（`raw` は生送信が目的なので hex のみ）。バイナリ値は常に `edt_hex` を含み、デコード辞書にあれば `value`、EPC 名が既知なら `name` を併記する。
+`eoj` は hex。`epc` は hex（`80`）でも正規名（`power` / `operation_mode` / `open_close_state` 等）でも指定でき、名前はクラス固有を優先して解決する。`set` の `edt` も hex（`42`）でも enum 型の意味名（`close` / `on` 等）でも指定できる（数値や複数バイトは hex）。`raw` は生送信が目的なので EPC/EDT とも hex のみ。バイナリ値は常に `edt_hex` を含み、デコード辞書にあれば `value`、EPC 名が既知なら `name` を併記する。
 
 ```bash
 task run -- get 192.0.2.10 013001 power operation_mode room_temperature  # 名前で指定
-task run -- set 192.0.2.10 026301 open_close_operation 42                # 雨戸を閉
+task run -- set 192.0.2.10 026301 open_close_operation close             # 雨戸を閉 (名前指定)
 ```
 
 ## exit code (cron / n8n が分岐できる)

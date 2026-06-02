@@ -144,8 +144,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
         } => {
             let eoj = parse_eoj(&eoj)?;
             let epc = resolve_epc(eoj, &epc)?;
-            let edt = codec::hex_to_bytes(&edt)
-                .map_err(|e| AppError::new(ErrKind::Internal, format!("EDT hex 不正: {e}")))?;
+            let edt = resolve_edt(eoj, epc, &edt)?;
             commands::set(ip, eoj, epc, edt, Duration::from_millis(timeout_ms))
         }
         Command::Describe {
@@ -234,6 +233,16 @@ fn resolve_epc(eoj: Eoj, token: &str) -> Result<u8, AppError> {
     })
 }
 
+/// EDT トークンを解決する。enum 型 EPC の意味名 (例 close, on) を優先し、
+/// 名前に無ければ hex として解釈する (複数バイト EDT は hex 指定)。
+fn resolve_edt(eoj: Eoj, epc: u8, token: &str) -> Result<Vec<u8>, AppError> {
+    if let Some(b) = properties::edt_for_name(eoj, epc, token) {
+        return Ok(vec![b]);
+    }
+    codec::hex_to_bytes(token)
+        .map_err(|e| AppError::new(ErrKind::Internal, format!("EDT hex 不正: {e}")))
+}
+
 fn parse_epc_one(s: &str) -> Result<u8, AppError> {
     let bytes = codec::hex_to_bytes(s)
         .map_err(|e| AppError::new(ErrKind::Internal, format!("EPC hex 不正: {e}")))?;
@@ -304,5 +313,19 @@ mod tests {
         let shutter = Eoj::from_hex("026301").unwrap();
         assert_eq!(resolve_epc(shutter, "open_close_state").unwrap(), 0xEA);
         assert!(resolve_epc(aircon, "open_close_state").is_err());
+    }
+
+    #[test]
+    fn resolve_edt_name_or_hex() {
+        let shutter = Eoj::from_hex("026301").unwrap();
+        // enum 意味名
+        assert_eq!(resolve_edt(shutter, 0xE0, "close").unwrap(), vec![0x42]);
+        assert_eq!(resolve_edt(shutter, 0xE0, "open").unwrap(), vec![0x41]);
+        // hex フォールバック
+        assert_eq!(resolve_edt(shutter, 0xE0, "42").unwrap(), vec![0x42]);
+        // 数値型 EPC は名前無し → hex のみ
+        assert_eq!(resolve_edt(shutter, 0xE1, "32").unwrap(), vec![0x32]);
+        // 名前でも hex でもない
+        assert!(resolve_edt(shutter, 0xE0, "bogus").is_err());
     }
 }
