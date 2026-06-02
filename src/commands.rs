@@ -255,7 +255,16 @@ pub fn describe(ip: IpAddr, eoj: Eoj, timeout: Duration) -> Result<Value, AppErr
         };
         match properties::parse_property_map(&p.edt) {
             Some(epcs) => {
-                out[key] = json!(epcs.iter().map(|e| format!("{e:02X}")).collect::<Vec<_>>());
+                out[key] = json!(epcs
+                    .iter()
+                    .map(|&e| {
+                        let mut o = json!({ "epc": format!("{e:02X}") });
+                        if let Some(name) = properties::epc_name(eoj, e) {
+                            o["name"] = json!(name);
+                        }
+                        o
+                    })
+                    .collect::<Vec<_>>());
             }
             // 壊れた / 空マップでも生 hex は残す。
             None => out[key] = json!({ "edt_hex": codec::bytes_to_hex(&p.edt) }),
