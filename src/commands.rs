@@ -262,6 +262,9 @@ pub fn describe(ip: IpAddr, eoj: Eoj, timeout: Duration) -> Result<Value, AppErr
                         if let Some(name) = properties::epc_name(eoj, e) {
                             o["name"] = json!(name);
                         }
+                        if let Some(values) = properties::epc_values(eoj, e) {
+                            o["values"] = values;
+                        }
                         o
                     })
                     .collect::<Vec<_>>());
