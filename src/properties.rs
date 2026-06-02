@@ -12,6 +12,8 @@ pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
     // スーパークラス共通 EPC (全機器)
     match epc {
         0x80 => return Some(decode_on_off(edt)),
+        0x82 => return decode_version(eoj, edt),
+        0x8A => return decode_manufacturer(edt),
         0x9D..=0x9F => return parse_property_map(edt).map(
             |m| json!({ "property_map": m.iter().map(|e| format!("{e:02X}")).collect::<Vec<_>>() }),
         ),
@@ -21,7 +23,114 @@ pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
     if eoj.class_group() == 0x0E && eoj.class() == 0xF0 && epc == 0xD6 {
         return decode_instance_list(edt);
     }
+    // 電動雨戸・シャッター (0x0263) 固有
+    if eoj.class_group() == 0x02 && eoj.class() == 0x63 {
+        if let Some(v) = decode_shutter(epc, edt) {
+            return Some(v);
+        }
+    }
     None
+}
+
+/// 0x82 規格Version情報。
+///
+/// 機器オブジェクトスーパークラス: byte1,2=予約(0x00)、byte3=対応 APPENDIX の
+/// Release 順を ASCII、byte4=リビジョン番号 (binary)。
+/// 例: Release P rev2 → `00 00 50 02` → release "P", revision 2。
+/// ノードプロファイル(0x0EF0): byte1=メジャー、byte2=マイナー、
+/// byte3=電文形式(0x01 規定/0x02 任意)。
+fn decode_version(eoj: Eoj, edt: &[u8]) -> Option<Value> {
+    if edt.len() < 4 {
+        return None;
+    }
+    if eoj.class_group() == 0x0E && eoj.class() == 0xF0 {
+        let message_format = match edt[2] {
+            0x01 => "specified",
+            0x02 => "arbitrary",
+            _ => "unknown",
+        };
+        Some(json!({
+            "protocol_version": format!("{}.{}", edt[0], edt[1]),
+            "message_format": message_format,
+        }))
+    } else {
+        let release = edt[2];
+        if release.is_ascii_graphic() {
+            Some(json!({
+                "release": (release as char).to_string(),
+                "revision": edt[3],
+            }))
+        } else {
+            None
+        }
+    }
+}
+
+/// 0x8A メーカコード: 3 バイト (ECHONET コンソーシアム規定)。
+/// 常に code を hex で出し、既知メーカは社名を併記する。
+fn decode_manufacturer(edt: &[u8]) -> Option<Value> {
+    if edt.len() != 3 {
+        return None;
+    }
+    let code = (u32::from(edt[0]) << 16) | (u32::from(edt[1]) << 8) | u32::from(edt[2]);
+    let mut obj = json!({ "manufacturer_code": format!("{code:06X}") });
+    if let Some(name) = manufacturer_name(code) {
+        obj["manufacturer"] = json!(name);
+    }
+    Some(obj)
+}
+
+/// 既知メーカコード → 社名。公式「発行済メーカコード一覧」から主要社を抜粋。
+/// 不明なら None (呼び出し側は code hex のみ出す)。
+fn manufacturer_name(code: u32) -> Option<&'static str> {
+    Some(match code {
+        0x000005 => "シャープ",
+        0x000006 => "三菱電機",
+        0x000008 => "ダイキン工業",
+        0x00000B => "パナソニック",
+        0x000016 => "東芝",
+        0x000022 => "日立グローバルライフソリューションズ",
+        0x00003B => "京セラ",
+        0x00003C => "デンソー",
+        0x00003D => "住友電気工業",
+        0x00004E => "富士通",
+        0x000054 => "ノーリツ",
+        0x000059 => "リンナイ",
+        0x000064 => "オムロン ソーシアルソリューションズ",
+        0x000067 => "コロナ",
+        0x000069 => "東芝ライフスタイル",
+        0x00006C => "ニチコン",
+        _ => return None,
+    })
+}
+
+/// 電動雨戸・シャッター (0x0263) 固有 EPC のデコード。
+fn decode_shutter(epc: u8, edt: &[u8]) -> Option<Value> {
+    match epc {
+        // 0xE0 開閉動作設定: 開=0x41 / 閉=0x42 / 停止=0x43
+        0xE0 => Some(json!({
+            "operation": match edt.first() {
+                Some(0x41) => "open",
+                Some(0x42) => "close",
+                Some(0x43) => "stop",
+                _ => "unknown",
+            }
+        })),
+        // 0xE1 開度レベル設定: 0x00-0x64 (0-100%)
+        0xE1 => edt.first().map(|&v| json!({ "open_level_percent": v })),
+        // 0xEA 開閉状態: 全開/全閉/開動作中/閉動作中/途中停止
+        0xEA => Some(json!({
+            "state": match edt.first() {
+                Some(0x41) => "fully_open",
+                Some(0x42) => "fully_closed",
+                Some(0x43) => "opening",
+                Some(0x44) => "closing",
+                Some(0x45) => "stopped_midway",
+                _ => "unknown",
+            }
+        })),
+        _ => None,
+    }
 }
 
 /// 0x80 動作状態: 0x30=ON / 0x31=OFF。
@@ -194,5 +303,54 @@ mod tests {
     #[test]
     fn unknown_epc_returns_none() {
         assert!(decode(Eoj([1, 0x30, 1]), 0xFF, &[0xAB]).is_none());
+    }
+
+    #[test]
+    fn version_device_release() {
+        // 機器オブジェクト: Release P rev2 → 00 00 50 02
+        let v = decode(Eoj([0x02, 0x63, 1]), 0x82, &[0x00, 0x00, 0x50, 0x02]).unwrap();
+        assert_eq!(v["release"], "P");
+        assert_eq!(v["revision"], 2);
+    }
+
+    #[test]
+    fn version_node_profile_protocol() {
+        // ノードプロファイル: 01 0d 01 00 → Ver1.13 規定電文形式
+        let v = decode(Eoj([0x0E, 0xF0, 1]), 0x82, &[0x01, 0x0D, 0x01, 0x00]).unwrap();
+        assert_eq!(v["protocol_version"], "1.13");
+        assert_eq!(v["message_format"], "specified");
+    }
+
+    #[test]
+    fn version_non_ascii_release_none() {
+        assert!(decode(Eoj([0x02, 0x63, 1]), 0x82, &[0x00, 0x00, 0x00, 0x00]).is_none());
+    }
+
+    #[test]
+    fn manufacturer_known() {
+        let v = decode(Eoj([0x02, 0x63, 1]), 0x8A, &[0x00, 0x00, 0x0B]).unwrap();
+        assert_eq!(v["manufacturer_code"], "00000B");
+        assert_eq!(v["manufacturer"], "パナソニック");
+    }
+
+    #[test]
+    fn manufacturer_unknown_hex_only() {
+        let v = decode(Eoj([0x02, 0x63, 1]), 0x8A, &[0xAB, 0xCD, 0xEF]).unwrap();
+        assert_eq!(v["manufacturer_code"], "ABCDEF");
+        assert!(v.get("manufacturer").is_none());
+    }
+
+    #[test]
+    fn shutter_operation_and_state() {
+        let eoj = Eoj([0x02, 0x63, 1]);
+        assert_eq!(decode(eoj, 0xE0, &[0x42]).unwrap()["operation"], "close");
+        assert_eq!(decode(eoj, 0xE1, &[0x32]).unwrap()["open_level_percent"], 50);
+        assert_eq!(decode(eoj, 0xEA, &[0x43]).unwrap()["state"], "opening");
+    }
+
+    #[test]
+    fn shutter_epc_only_applies_to_shutter_class() {
+        // 0xE0 は雨戸クラス以外では未知 EPC 扱い
+        assert!(decode(Eoj([0x01, 0x30, 1]), 0xE0, &[0x41]).is_none());
     }
 }
