@@ -114,7 +114,6 @@ The core (discover / get / set / describe) is verified against real devices.
 
 - [x] Expanded decode dictionary — `82` spec version, `8A` manufacturer code (major vendors named, unknown ones left as hex), electric shutter `0263`, home AC `0130`. Unknown EPCs still return raw hex.
 - [x] `raw` subcommand — send arbitrary ESV/EPC/EDT, return raw response hex.
-- [ ] INF notification listener — pick up device-initiated state-change notifications (ESV `0x73`) via blocking recv for a window.
 - [ ] Output schema stabilization — don't break across versions, since LLMs / `jq` depend on it.
 
 ## License
