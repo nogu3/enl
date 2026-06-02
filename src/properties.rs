@@ -501,7 +501,10 @@ mod tests {
     fn shutter_operation_and_state() {
         let eoj = Eoj([0x02, 0x63, 1]);
         assert_eq!(decode(eoj, 0xE0, &[0x42]).unwrap()["operation"], "close");
-        assert_eq!(decode(eoj, 0xE1, &[0x32]).unwrap()["open_level_percent"], 50);
+        assert_eq!(
+            decode(eoj, 0xE1, &[0x32]).unwrap()["open_level_percent"],
+            50
+        );
         assert_eq!(decode(eoj, 0xEA, &[0x43]).unwrap()["state"], "opening");
     }
 
@@ -514,9 +517,18 @@ mod tests {
     #[test]
     fn aircon_operation_mode() {
         let eoj = Eoj([0x01, 0x30, 1]);
-        assert_eq!(decode(eoj, 0xB0, &[0x42]).unwrap()["operation_mode"], "cool");
-        assert_eq!(decode(eoj, 0xB0, &[0x43]).unwrap()["operation_mode"], "heat");
-        assert_eq!(decode(eoj, 0xB0, &[0x40]).unwrap()["operation_mode"], "other");
+        assert_eq!(
+            decode(eoj, 0xB0, &[0x42]).unwrap()["operation_mode"],
+            "cool"
+        );
+        assert_eq!(
+            decode(eoj, 0xB0, &[0x43]).unwrap()["operation_mode"],
+            "heat"
+        );
+        assert_eq!(
+            decode(eoj, 0xB0, &[0x40]).unwrap()["operation_mode"],
+            "other"
+        );
     }
 
     #[test]
