@@ -12,9 +12,9 @@ pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
     // スーパークラス共通 EPC (全機器)
     match epc {
         0x80 => return Some(decode_on_off(edt)),
-        0x9D..=0x9F => return parse_property_map(edt).map(|m| {
-            json!({ "property_map": m.iter().map(|e| format!("{e:02X}")).collect::<Vec<_>>() })
-        }),
+        0x9D..=0x9F => return parse_property_map(edt).map(
+            |m| json!({ "property_map": m.iter().map(|e| format!("{e:02X}")).collect::<Vec<_>>() }),
+        ),
         _ => {}
     }
     // ノードプロファイル (0x0EF0xx) 固有
@@ -181,8 +181,14 @@ mod tests {
 
     #[test]
     fn on_off_decode() {
-        assert_eq!(decode(Eoj([1, 0x30, 1]), 0x80, &[0x30]).unwrap()["power"], "on");
-        assert_eq!(decode(Eoj([1, 0x30, 1]), 0x80, &[0x31]).unwrap()["power"], "off");
+        assert_eq!(
+            decode(Eoj([1, 0x30, 1]), 0x80, &[0x30]).unwrap()["power"],
+            "on"
+        );
+        assert_eq!(
+            decode(Eoj([1, 0x30, 1]), 0x80, &[0x31]).unwrap()["power"],
+            "off"
+        );
     }
 
     #[test]

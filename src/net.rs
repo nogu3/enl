@@ -2,6 +2,9 @@
 //!
 //! 最重要: 仕様準拠機器は応答を送信元ポートでなく 3610 に返す。
 //! よって送受信ソケットを 0.0.0.0:3610 にバインドして専有する。
+//!
+//! discover は CIDR sweep (各ホストへ unicast Get) 方式。multicast は
+//! WiFi/AP 環境 (IGMP snooping, multicast 抑制) で信頼性が低いため採用しない。
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
@@ -10,25 +13,18 @@ use std::time::{Duration, Instant};
 use crate::error::{AppError, ErrKind};
 
 pub const ECHONET_PORT: u16 = 3610;
-pub const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 23, 0);
 
-/// 3610 を専有するソケットを開き、マルチキャストグループに join する。
-/// バインド失敗は bind エラー (exit 5) として返す。
+/// 3610 を専有する UDP ソケットを開く。バインド失敗は bind エラー (exit 5)。
 pub fn open_socket() -> Result<UdpSocket, AppError> {
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, ECHONET_PORT);
-    let socket = UdpSocket::bind(bind_addr).map_err(|e| {
+    UdpSocket::bind(bind_addr).map_err(|e| {
         AppError::new(
             ErrKind::Bind,
-            format!("0.0.0.0:{ECHONET_PORT} へのバインド失敗: {e}。HA 等が 3610 を専有していないか確認"),
+            format!(
+                "0.0.0.0:{ECHONET_PORT} へのバインド失敗: {e}。HA 等が 3610 を専有していないか確認"
+            ),
         )
-    })?;
-    socket
-        .join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED)
-        .map_err(|e| AppError::new(ErrKind::Network, format!("マルチキャスト join 失敗: {e}")))?;
-    socket
-        .set_multicast_loop_v4(false)
-        .map_err(|e| AppError::new(ErrKind::Network, format!("set_multicast_loop 失敗: {e}")))?;
-    Ok(socket)
+    })
 }
 
 /// 受信した 1 データグラム。
@@ -37,18 +33,9 @@ pub struct Datagram {
     pub data: Vec<u8>,
 }
 
-/// フレームを送り、`window` の間 recv を集める (discovery 用)。
-/// 複数機器からの応答を全部集めて返す。
-pub fn send_and_collect(
-    socket: &UdpSocket,
-    dst: SocketAddr,
-    payload: &[u8],
-    window: Duration,
-) -> Result<Vec<Datagram>, AppError> {
-    socket
-        .send_to(payload, dst)
-        .map_err(|e| AppError::new(ErrKind::Network, format!("送信失敗: {e}")))?;
-
+/// `window` の間 recv を集める (sweep discovery 用)。
+/// 送信は呼び出し側で複数 send_to を済ませる前提。
+pub fn collect_until(socket: &UdpSocket, window: Duration) -> Result<Vec<Datagram>, AppError> {
     let mut out = Vec::new();
     let deadline = Instant::now() + window;
     let mut buf = [0u8; 1500];
@@ -61,8 +48,13 @@ pub fn send_and_collect(
             .set_read_timeout(Some(remaining))
             .map_err(|e| AppError::new(ErrKind::Network, format!("set_read_timeout 失敗: {e}")))?;
         match socket.recv_from(&mut buf) {
-            Ok((n, from)) => out.push(Datagram { from, data: buf[..n].to_vec() }),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            Ok((n, from)) => out.push(Datagram {
+                from,
+                data: buf[..n].to_vec(),
+            }),
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
                 break
             }
             Err(e) => return Err(AppError::new(ErrKind::Network, format!("受信失敗: {e}"))),
@@ -94,7 +86,10 @@ pub fn send_and_recv_one(
         match socket.recv_from(&mut buf) {
             Ok((n, from)) => {
                 if from.ip() == dst.ip() {
-                    return Ok(Datagram { from, data: buf[..n].to_vec() });
+                    return Ok(Datagram {
+                        from,
+                        data: buf[..n].to_vec(),
+                    });
                 }
                 // 宛先以外。残り時間で再試行。
                 match deadline.checked_duration_since(Instant::now()) {
@@ -104,7 +99,9 @@ pub fn send_and_recv_one(
                     _ => break,
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
                 break
             }
             Err(e) => return Err(AppError::new(ErrKind::Network, format!("受信失敗: {e}"))),

@@ -1,6 +1,7 @@
 //! 各サブコマンドの実装。出力は純粋な構造化 JSON (stdout)。
 
-use std::net::{IpAddr, SocketAddr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -28,8 +29,24 @@ fn next_tid() -> u16 {
         .unwrap_or(1)
 }
 
-/// マルチキャストで Get 0xD6 を投げ、応答ノードを集約する。
-pub fn discover(window: Duration) -> Result<Value, AppError> {
+/// CIDR sweep ベースの discovery。
+///
+/// 指定 CIDR (or iface IP の /24) 内の全ホストへ unicast `Get 0EF001 D6` を送り、
+/// `window` の間に返ってきたノードを集約する。
+/// multicast (224.0.23.0) は WiFi/AP 環境で取りこぼしが多いため使わない。
+pub fn discover(
+    cidr: Option<&str>,
+    iface: Option<Ipv4Addr>,
+    window: Duration,
+) -> Result<Value, AppError> {
+    let (base, prefix) = resolve_cidr(cidr, iface)?;
+    let hosts = enumerate_hosts(base, prefix);
+    if hosts.is_empty() {
+        return Err(AppError::new(
+            ErrKind::Internal,
+            format!("CIDR {}/{} に有効ホストなし", base, prefix),
+        ));
+    }
     let socket = net::open_socket()?;
     let frame = Frame::standard(
         next_tid(),
@@ -38,13 +55,33 @@ pub fn discover(window: Duration) -> Result<Value, AppError> {
         Esv::Get,
         vec![Property::get(EPC_INSTANCE_LIST)],
     );
-    let dst = SocketAddr::new(IpAddr::V4(net::MULTICAST_ADDR), net::ECHONET_PORT);
-    tracing::info!(?dst, window_ms = window.as_millis(), "discovery 送信");
+    let payload = codec::build(&frame);
 
-    let datagrams = net::send_and_collect(&socket, dst, &codec::build(&frame), window)?;
+    tracing::info!(
+        base = %base,
+        prefix,
+        hosts = hosts.len(),
+        window_ms = window.as_millis(),
+        "sweep discovery 送信"
+    );
 
-    let mut devices = Vec::new();
+    for h in &hosts {
+        let dst = SocketAddr::new(IpAddr::V4(*h), net::ECHONET_PORT);
+        if let Err(e) = socket.send_to(&payload, dst) {
+            tracing::debug!(ip = %h, error = %e, "send_to 失敗 (continue)");
+        }
+    }
+
+    let datagrams = net::collect_until(&socket, window)?;
+
+    // 応答 (ESV=0x7X) のみ採用。リクエストフレーム (自身の 3610 への送信が
+    // loopback で戻ってきたもの、他コントローラのトラフィック等) は無視する。
+    // 同一 IP から複数応答が来た場合は最初の正常パースを採用。
+    let mut by_ip: HashMap<IpAddr, Value> = HashMap::new();
     for dg in datagrams {
+        if by_ip.contains_key(&dg.from.ip()) {
+            continue;
+        }
         let frame = match codec::parse(&dg.data) {
             Ok(f) => f,
             Err(e) => {
@@ -52,6 +89,14 @@ pub fn discover(window: Duration) -> Result<Value, AppError> {
                 continue;
             }
         };
+        let esv = match &frame.edata {
+            Edata::Standard { esv, .. } | Edata::SetGet { esv, .. } => *esv,
+            Edata::Arbitrary(_) => continue,
+        };
+        if !esv.is_response() {
+            tracing::debug!(from = %dg.from, esv = esv.name(), "非応答フレームをスキップ");
+            continue;
+        }
         let mut device = json!({ "ip": dg.from.ip().to_string() });
         if let Some(props) = frame.props() {
             for p in props {
@@ -63,10 +108,58 @@ pub fn discover(window: Duration) -> Result<Value, AppError> {
                 }
             }
         }
-        devices.push(device);
+        by_ip.insert(dg.from.ip(), device);
     }
+
+    let mut devices: Vec<Value> = by_ip.into_values().collect();
+    devices.sort_by(|a, b| a["ip"].as_str().cmp(&b["ip"].as_str()));
     tracing::info!(devices = devices.len(), "discovery 完了");
     Ok(json!({ "devices": devices }))
+}
+
+/// `--cidr` 優先、無ければ iface IP から /24 を推定。両方無ければエラー。
+fn resolve_cidr(cidr: Option<&str>, iface: Option<Ipv4Addr>) -> Result<(Ipv4Addr, u8), AppError> {
+    if let Some(s) = cidr {
+        return parse_cidr(s)
+            .map_err(|e| AppError::new(ErrKind::Internal, format!("CIDR 不正 '{s}': {e}")));
+    }
+    if let Some(ip) = iface {
+        let oct = ip.octets();
+        return Ok((Ipv4Addr::new(oct[0], oct[1], oct[2], 0), 24));
+    }
+    Err(AppError::new(
+        ErrKind::Internal,
+        "--cidr <CIDR> もしくは -i <IPv4> のいずれかが必要 (例: --cidr 192.168.1.0/24)",
+    ))
+}
+
+fn parse_cidr(s: &str) -> Result<(Ipv4Addr, u8), String> {
+    let (addr, prefix) = s.split_once('/').ok_or_else(|| "'/' 無し".to_string())?;
+    let addr: Ipv4Addr = addr.parse().map_err(|e| format!("IP: {e}"))?;
+    let prefix: u8 = prefix.parse().map_err(|e| format!("prefix: {e}"))?;
+    if prefix > 32 {
+        return Err(format!("prefix {prefix} > 32"));
+    }
+    Ok((addr, prefix))
+}
+
+/// CIDR 内の探索対象ホスト IPv4 を列挙する。
+/// /31, /32 はネットワーク/ブロードキャストの概念を使わず全 IP を返す。
+/// それ以外はネットワーク・ブロードキャストアドレスを除外する。
+fn enumerate_hosts(net: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let base = u32::from_be_bytes(net.octets()) & mask;
+    let bcast = base | !mask;
+    let range = if prefix >= 31 {
+        base..=bcast
+    } else {
+        (base + 1)..=(bcast - 1)
+    };
+    range.map(|n| Ipv4Addr::from(n.to_be_bytes())).collect()
 }
 
 /// IP / EOJ / EPC を指定して Get。
@@ -81,7 +174,10 @@ pub fn get(ip: IpAddr, eoj: Eoj, epcs: &[u8], timeout: Duration) -> Result<Value
     let resp = parse_response(&dg.data)?;
 
     let (esv, props) = standard_or_reject(&resp, eoj)?;
-    let properties: Vec<Value> = props.iter().map(|p| property_json(eoj, p.epc, &p.edt)).collect();
+    let properties: Vec<Value> = props
+        .iter()
+        .map(|p| property_json(eoj, p.epc, &p.edt))
+        .collect();
 
     Ok(json!({
         "ip": ip.to_string(),
@@ -92,9 +188,21 @@ pub fn get(ip: IpAddr, eoj: Eoj, epcs: &[u8], timeout: Duration) -> Result<Value
 }
 
 /// IP / EOJ / EPC / EDT を指定して Set (SetC = 応答要求)。
-pub fn set(ip: IpAddr, eoj: Eoj, epc: u8, edt: Vec<u8>, timeout: Duration) -> Result<Value, AppError> {
+pub fn set(
+    ip: IpAddr,
+    eoj: Eoj,
+    epc: u8,
+    edt: Vec<u8>,
+    timeout: Duration,
+) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
-    let frame = Frame::standard(next_tid(), CONTROLLER, eoj, Esv::SetC, vec![Property::new(epc, edt)]);
+    let frame = Frame::standard(
+        next_tid(),
+        CONTROLLER,
+        eoj,
+        Esv::SetC,
+        vec![Property::new(epc, edt)],
+    );
     let dst = SocketAddr::new(ip, net::ECHONET_PORT);
     tracing::info!(%ip, eoj = eoj.to_hex(), epc = format!("{epc:02X}"), "set 送信");
 
@@ -103,7 +211,10 @@ pub fn set(ip: IpAddr, eoj: Eoj, epc: u8, edt: Vec<u8>, timeout: Duration) -> Re
     let (esv, props) = standard_or_reject(&resp, eoj)?;
 
     // Set_Res は EDT 無し (PDC=0) のプロパティが返る。
-    let properties: Vec<Value> = props.iter().map(|p| property_json(eoj, p.epc, &p.edt)).collect();
+    let properties: Vec<Value> = props
+        .iter()
+        .map(|p| property_json(eoj, p.epc, &p.edt))
+        .collect();
     Ok(json!({
         "ip": ip.to_string(),
         "eoj": eoj.to_hex(),
@@ -166,12 +277,15 @@ fn standard_or_reject(frame: &Frame, eoj: Eoj) -> Result<(Esv, Vec<Property>), A
     match &frame.edata {
         Edata::Standard { esv, props, .. } => {
             if esv.is_sna() {
-                let rejected: Vec<String> = props.iter().map(|p| format!("{:02X}", p.epc)).collect();
+                let rejected: Vec<String> =
+                    props.iter().map(|p| format!("{:02X}", p.epc)).collect();
                 return Err(AppError::new(
                     ErrKind::DeviceRejected,
                     format!("機器が {} を拒否 (SNA)", esv.name()),
                 )
-                .with_extra(json!({ "eoj": eoj.to_hex(), "esv": esv.name(), "rejected_epc": rejected })));
+                .with_extra(
+                    json!({ "eoj": eoj.to_hex(), "esv": esv.name(), "rejected_epc": rejected }),
+                ));
             }
             Ok((*esv, props.clone()))
         }
@@ -190,5 +304,73 @@ fn standard_or_reject(frame: &Frame, eoj: Eoj) -> Result<(Esv, Vec<Property>), A
             "任意電文形式 (EHD2=0x82) の応答は解釈不能",
         )
         .with_extra(json!({ "raw_hex": codec::bytes_to_hex(bytes) }))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cidr_basic() {
+        assert_eq!(
+            parse_cidr("192.168.1.0/24").unwrap(),
+            (Ipv4Addr::new(192, 168, 1, 0), 24)
+        );
+        assert_eq!(
+            parse_cidr("10.0.0.0/8").unwrap(),
+            (Ipv4Addr::new(10, 0, 0, 0), 8)
+        );
+    }
+
+    #[test]
+    fn parse_cidr_errors() {
+        assert!(parse_cidr("192.168.1.0").is_err());
+        assert!(parse_cidr("192.168.1.0/33").is_err());
+        assert!(parse_cidr("nope/24").is_err());
+    }
+
+    #[test]
+    fn enumerate_hosts_slash24() {
+        let hosts = enumerate_hosts(Ipv4Addr::new(192, 168, 1, 0), 24);
+        assert_eq!(hosts.len(), 254);
+        assert_eq!(hosts.first(), Some(&Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(hosts.last(), Some(&Ipv4Addr::new(192, 168, 1, 254)));
+    }
+
+    #[test]
+    fn enumerate_hosts_slash32() {
+        let hosts = enumerate_hosts(Ipv4Addr::new(192, 168, 1, 42), 32);
+        assert_eq!(hosts, vec![Ipv4Addr::new(192, 168, 1, 42)]);
+    }
+
+    #[test]
+    fn enumerate_hosts_slash30() {
+        // base=.0, bcast=.3 → host=.1, .2
+        let hosts = enumerate_hosts(Ipv4Addr::new(10, 0, 0, 0), 30);
+        assert_eq!(
+            hosts,
+            vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)]
+        );
+    }
+
+    #[test]
+    fn resolve_cidr_from_iface() {
+        let (base, prefix) = resolve_cidr(None, Some(Ipv4Addr::new(192, 168, 1, 130))).unwrap();
+        assert_eq!(base, Ipv4Addr::new(192, 168, 1, 0));
+        assert_eq!(prefix, 24);
+    }
+
+    #[test]
+    fn resolve_cidr_explicit_wins() {
+        let (base, prefix) =
+            resolve_cidr(Some("10.0.0.0/16"), Some(Ipv4Addr::new(192, 168, 1, 130))).unwrap();
+        assert_eq!(base, Ipv4Addr::new(10, 0, 0, 0));
+        assert_eq!(prefix, 16);
+    }
+
+    #[test]
+    fn resolve_cidr_neither_errors() {
+        assert!(resolve_cidr(None, None).is_err());
     }
 }

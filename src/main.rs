@@ -10,7 +10,7 @@ mod error;
 mod net;
 mod properties;
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -20,16 +20,28 @@ use codec::Eoj;
 use error::{AppError, ErrKind};
 
 #[derive(Parser)]
-#[command(name = "enl", version, about = "ECHONET Lite 専用 CLI (ステートレス / one-shot)")]
+#[command(
+    name = "enl",
+    version,
+    about = "ECHONET Lite 専用 CLI (ステートレス / one-shot)"
+)]
 struct Cli {
+    /// ローカル IPv4 (discover で CIDR 省略時に /24 を自動推定するのに使う)。
+    /// 例: -i 192.168.1.130 → 192.168.1.0/24 を sweep。
+    #[arg(short = 'i', long = "iface", global = true)]
+    iface: Option<Ipv4Addr>,
+
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// マルチキャストでノードを探索 (Get 0xD6)。
+    /// CIDR sweep でノードを探索 (各ホストへ unicast Get 0EF001 D6)。
     Discover {
+        /// 探索する CIDR (例: 192.168.1.0/24)。省略時は -i のローカル IP から /24 を推定。
+        #[arg(long)]
+        cidr: Option<String>,
         /// 応答収集ウィンドウ (ミリ秒)。
         #[arg(long, default_value_t = 3000)]
         timeout_ms: u64,
@@ -89,21 +101,39 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
+    let iface = cli.iface;
     match cli.command {
-        Command::Discover { timeout_ms } => commands::discover(Duration::from_millis(timeout_ms)),
-        Command::Get { ip, eoj, epc, timeout_ms } => {
+        Command::Discover { cidr, timeout_ms } => {
+            commands::discover(cidr.as_deref(), iface, Duration::from_millis(timeout_ms))
+        }
+        Command::Get {
+            ip,
+            eoj,
+            epc,
+            timeout_ms,
+        } => {
             let eoj = parse_eoj(&eoj)?;
             let epcs = parse_epcs(&epc)?;
             commands::get(ip, eoj, &epcs, Duration::from_millis(timeout_ms))
         }
-        Command::Set { ip, eoj, epc, edt, timeout_ms } => {
+        Command::Set {
+            ip,
+            eoj,
+            epc,
+            edt,
+            timeout_ms,
+        } => {
             let eoj = parse_eoj(&eoj)?;
             let epc = parse_epc_one(&epc)?;
             let edt = codec::hex_to_bytes(&edt)
                 .map_err(|e| AppError::new(ErrKind::Internal, format!("EDT hex 不正: {e}")))?;
             commands::set(ip, eoj, epc, edt, Duration::from_millis(timeout_ms))
         }
-        Command::Describe { ip, eoj, timeout_ms } => {
+        Command::Describe {
+            ip,
+            eoj,
+            timeout_ms,
+        } => {
             let eoj = parse_eoj(&eoj)?;
             commands::describe(ip, eoj, Duration::from_millis(timeout_ms))
         }
@@ -122,7 +152,10 @@ fn parse_epc_one(s: &str) -> Result<u8, AppError> {
     let bytes = codec::hex_to_bytes(s)
         .map_err(|e| AppError::new(ErrKind::Internal, format!("EPC hex 不正: {e}")))?;
     if bytes.len() != 1 {
-        return Err(AppError::new(ErrKind::Internal, "EPC は 1 バイト (2 hex 桁) 必須"));
+        return Err(AppError::new(
+            ErrKind::Internal,
+            "EPC は 1 バイト (2 hex 桁) 必須",
+        ));
     }
     Ok(bytes[0])
 }
