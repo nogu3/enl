@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use codec::Eoj;
+use codec::{Eoj, Esv, Property};
 use error::{AppError, ErrKind};
 
 #[derive(Parser)]
@@ -74,6 +74,25 @@ enum Command {
     Describe {
         ip: IpAddr,
         eoj: String,
+        #[arg(long, default_value_t = 2000)]
+        timeout_ms: u64,
+    },
+    /// 任意 ESV/EPC/EDT を生で送り、生応答 hex を返す (デバッグ / 未対応操作の逃げ道)。
+    ///
+    /// 規定形式 (EHD2=0x81) の Standard フレームを 1 本送る。SNA 応答もエラーにせず
+    /// response_hex を返す。応答が来ない場合のみ timeout (exit 3)。
+    Raw {
+        ip: IpAddr,
+        /// 宛先 EOJ (DEOJ, 6 hex 桁, 例 013001)。
+        eoj: String,
+        /// ESV (2 hex 桁, 例 62=Get 61=SetC 63=InfReq)。
+        esv: String,
+        /// EPC[:EDT] の組 (例 80 か 80:30)。Get 系は EDT 省略、複数可。
+        #[arg(num_args = 0..)]
+        props: Vec<String>,
+        /// 送信元 EOJ (SEOJ, 6 hex 桁)。省略時はコントローラ 05FF01。
+        #[arg(long)]
+        seoj: Option<String>,
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
@@ -137,7 +156,60 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             let eoj = parse_eoj(&eoj)?;
             commands::describe(ip, eoj, Duration::from_millis(timeout_ms))
         }
+        Command::Raw {
+            ip,
+            eoj,
+            esv,
+            props,
+            seoj,
+            timeout_ms,
+        } => {
+            let deoj = parse_eoj(&eoj)?;
+            let esv = parse_esv(&esv)?;
+            let seoj = seoj.as_deref().map(parse_eoj).transpose()?;
+            let props = props
+                .iter()
+                .map(|s| parse_prop_arg(s))
+                .collect::<Result<Vec<_>, _>>()?;
+            commands::raw(
+                ip,
+                deoj,
+                esv,
+                seoj,
+                props,
+                Duration::from_millis(timeout_ms),
+            )
+        }
     }
+}
+
+/// "62" → Esv。1 バイト hex を ESV として解釈 (未知値は Esv::Unknown で通す)。
+fn parse_esv(s: &str) -> Result<Esv, AppError> {
+    let bytes = codec::hex_to_bytes(s)
+        .map_err(|e| AppError::new(ErrKind::Internal, format!("ESV hex 不正: {e}")))?;
+    if bytes.len() != 1 {
+        return Err(AppError::new(
+            ErrKind::Internal,
+            "ESV は 1 バイト (2 hex 桁) 必須",
+        ));
+    }
+    Ok(Esv::from_u8(bytes[0]))
+}
+
+/// "80" or "80:30" → Property。`:` 右が EDT (省略時 PDC=0)。
+fn parse_prop_arg(s: &str) -> Result<Property, AppError> {
+    let (epc_s, edt_s) = match s.split_once(':') {
+        Some((a, b)) => (a, b),
+        None => (s, ""),
+    };
+    let epc = parse_epc_one(epc_s)?;
+    let edt = if edt_s.is_empty() {
+        Vec::new()
+    } else {
+        codec::hex_to_bytes(edt_s)
+            .map_err(|e| AppError::new(ErrKind::Internal, format!("EDT hex 不正 '{edt_s}': {e}")))?
+    };
+    Ok(Property::new(epc, edt))
 }
 
 fn parse_eoj(s: &str) -> Result<Eoj, AppError> {
@@ -158,4 +230,43 @@ fn parse_epc_one(s: &str) -> Result<u8, AppError> {
         ));
     }
     Ok(bytes[0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_esv_known_and_unknown() {
+        assert_eq!(parse_esv("62").unwrap(), Esv::Get);
+        assert_eq!(parse_esv("61").unwrap(), Esv::SetC);
+        assert_eq!(parse_esv("99").unwrap(), Esv::Unknown(0x99));
+        assert!(parse_esv("6201").is_err()); // 2 バイトは不可
+        assert!(parse_esv("zz").is_err());
+    }
+
+    #[test]
+    fn parse_prop_arg_get_form() {
+        // EDT 省略 → PDC=0
+        assert_eq!(parse_prop_arg("80").unwrap(), Property::new(0x80, vec![]));
+    }
+
+    #[test]
+    fn parse_prop_arg_set_form() {
+        assert_eq!(
+            parse_prop_arg("80:30").unwrap(),
+            Property::new(0x80, vec![0x30])
+        );
+        // 複数バイト EDT
+        assert_eq!(
+            parse_prop_arg("d6:0101300 1".replace(' ', "").as_str()).unwrap(),
+            Property::new(0xD6, vec![0x01, 0x01, 0x30, 0x01])
+        );
+    }
+
+    #[test]
+    fn parse_prop_arg_errors() {
+        assert!(parse_prop_arg("8030:30").is_err()); // EPC は 1 バイト
+        assert!(parse_prop_arg("80:zz").is_err()); // EDT hex 不正
+    }
 }

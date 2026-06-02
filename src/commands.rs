@@ -264,6 +264,91 @@ pub fn describe(ip: IpAddr, eoj: Eoj, timeout: Duration) -> Result<Value, AppErr
     Ok(out)
 }
 
+/// 任意 ESV/EPC/EDT を生送信し生応答 hex を返す (デバッグ / 未対応操作の逃げ道)。
+///
+/// SNA も含め「応答が返れば成功」とし response_hex を必ず出す。
+/// 応答パースは best-effort で、できれば frame に併記、ダメでも壊れない。
+/// 応答が来ない場合のみ timeout (exit 3)。
+pub fn raw(
+    ip: IpAddr,
+    deoj: Eoj,
+    esv: Esv,
+    seoj: Option<Eoj>,
+    props: Vec<Property>,
+    timeout: Duration,
+) -> Result<Value, AppError> {
+    let socket = net::open_socket()?;
+    let seoj = seoj.unwrap_or(CONTROLLER);
+    let frame = Frame::standard(next_tid(), seoj, deoj, esv, props);
+    let sent = codec::build(&frame);
+    let dst = SocketAddr::new(ip, net::ECHONET_PORT);
+    tracing::info!(%ip, deoj = deoj.to_hex(), esv = esv.name(), "raw 送信");
+
+    let dg = net::send_and_recv_one(&socket, dst, &sent, timeout)?;
+
+    let mut out = json!({
+        "ip": ip.to_string(),
+        "sent_hex": codec::bytes_to_hex(&sent),
+        "response_hex": codec::bytes_to_hex(&dg.data),
+    });
+    // パースは付加情報。失敗しても response_hex があるので壊れない。
+    match codec::parse(&dg.data) {
+        Ok(frame) => out["frame"] = frame_to_json(&frame),
+        Err(e) => {
+            tracing::warn!(error = %e, "raw 応答パース失敗 (response_hex は出力済み)");
+            out["parse_error"] = json!(e.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Frame をロスレスに JSON へダンプ (raw 用)。EDT デコードは応答 SEOJ 基準で best-effort。
+fn frame_to_json(frame: &Frame) -> Value {
+    let props_json = |seoj: Eoj, props: &[Property]| -> Vec<Value> {
+        props
+            .iter()
+            .map(|p| property_json(seoj, p.epc, &p.edt))
+            .collect()
+    };
+    let mut v = json!({
+        "ehd2": format!("{:02x}", frame.ehd2),
+        "tid": format!("{:04x}", frame.tid),
+    });
+    match &frame.edata {
+        Edata::Standard {
+            seoj,
+            deoj,
+            esv,
+            props,
+        } => {
+            v["format"] = json!("standard");
+            v["seoj"] = json!(seoj.to_hex());
+            v["deoj"] = json!(deoj.to_hex());
+            v["esv"] = json!(esv.name());
+            v["properties"] = json!(props_json(*seoj, props));
+        }
+        Edata::SetGet {
+            seoj,
+            deoj,
+            esv,
+            set_props,
+            get_props,
+        } => {
+            v["format"] = json!("setget");
+            v["seoj"] = json!(seoj.to_hex());
+            v["deoj"] = json!(deoj.to_hex());
+            v["esv"] = json!(esv.name());
+            v["set_properties"] = json!(props_json(*seoj, set_props));
+            v["get_properties"] = json!(props_json(*seoj, get_props));
+        }
+        Edata::Arbitrary(bytes) => {
+            v["format"] = json!("arbitrary");
+            v["edt_hex"] = json!(codec::bytes_to_hex(bytes));
+        }
+    }
+    v
+}
+
 /// 受信バイトを Frame にパース (失敗は parse エラー)。
 fn parse_response(data: &[u8]) -> Result<Frame, AppError> {
     codec::parse(data).map_err(|e| {

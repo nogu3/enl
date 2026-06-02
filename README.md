@@ -38,6 +38,12 @@ task docker:run -- discover         # host network で enl 実行
 - `get <ip> <eoj> <epc...> [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","pdc","edt_hex","value?"}]}`
 - `set <ip> <eoj> <epc> <edt> [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted","properties":[...]}`
 - `describe <ip> <eoj> [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[...],"set_map":[...],"inf_map":[...]}`
+- `raw <ip> <deoj> <esv> [epc[:edt]...] [--seoj 05FF01] [--timeout-ms 2000]` — 任意 ESV/EPC/EDT を生送信。`{"ip","sent_hex","response_hex","frame?":{...}}`。SNA もエラーにせず `response_hex` を返す（デバッグ / 未対応操作の逃げ道）。応答パース失敗時は `parse_error` を併記。
+
+```bash
+task run -- raw 192.0.2.10 013001 62 80          # Get 0x80 を生送信
+task run -- raw 192.0.2.10 013001 61 80:30       # SetC 0x80=ON
+```
 
 `eoj`/`epc`/`edt` は hex。バイナリ値は常に `edt_hex` を含み、デコード辞書にあれば `value` を併記する。
 
@@ -67,7 +73,7 @@ task docker:test   # Docker 内テスト (toolchain 不要)
 - `src/codec.rs` — フレームのデータモデル + parse/build。依存ゼロ手書き。ラウンドトリップテストで非対称バグを防ぐ。
 - `src/properties.rs` — 任意のデコードレイヤ。プロパティマップ (15以下/16以上の2形式) パーサ含む。
 - `src/net.rs` — UDP ソケット層 (0.0.0.0:3610 専有)。discover は CIDR sweep（各ホストへ unicast Get）。
-- `src/commands.rs` — discover / get / set / describe。
+- `src/commands.rs` — discover / get / set / describe / raw。
 - `src/error.rs` — 機械可読エラー + exit code。
 - `src/main.rs` — clap CLI。
 
@@ -76,6 +82,6 @@ task docker:test   # Docker 内テスト (toolchain 不要)
 コア（discover / get / set / describe）は実機検証済み。今後の候補:
 
 - [ ] デコード辞書の拡充 — `82` 規格Version、`8A` メーカコード（→ 社名）、機器クラス別の頻出 EPC（雨戸 `E0`/`E1` 等）。辞書になければ生 hex を返す方針は維持。
-- [ ] `raw` サブコマンド — 任意 ESV/EPC/EDT を生で送り生応答 hex を返す。デバッグ・未対応操作の逃げ道。
+- [x] `raw` サブコマンド — 任意 ESV/EPC/EDT を生で送り生応答 hex を返す。デバッグ・未対応操作の逃げ道。
 - [ ] INF 通知待受 — 機器発の状変通知（ESV `0x73`）をブロッキング recv で一定時間拾う。
 - [ ] 出力スキーマの安定化 — LLM / `jq` が依存するためバージョン間で破壊しない。
