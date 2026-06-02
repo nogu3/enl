@@ -106,6 +106,7 @@ fn manufacturer_name(code: u32) -> Option<&'static str> {
         0x000067 => "コロナ",
         0x000069 => "東芝ライフスタイル",
         0x00006C => "ニチコン",
+        0x0000C5 => "三和シヤッター工業",
         _ => return None,
     })
 }
