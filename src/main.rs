@@ -9,12 +9,13 @@ mod commands;
 mod error;
 mod net;
 mod properties;
+mod schema;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use codec::{Eoj, Esv, Property};
 use error::{AppError, ErrKind};
@@ -96,6 +97,36 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
+    /// 各サブコマンドの stdout 出力スキーマ (JSON Schema) を出す。ネットワーク不要。
+    ///
+    /// 出力スキーマは安定契約。LLM の function-calling / `jq` がこれをスキーマ取得に使える。
+    Schema {
+        /// 対象サブコマンド。省略時は全サブコマンドのスキーマを 1 オブジェクトで出す。
+        #[arg(value_enum)]
+        target: Option<SchemaTarget>,
+    },
+}
+
+/// `enl schema` の対象サブコマンド。clap が未知値を弾く (exit 2)。
+#[derive(Clone, Copy, ValueEnum)]
+enum SchemaTarget {
+    Discover,
+    Get,
+    Set,
+    Describe,
+    Raw,
+}
+
+impl SchemaTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            SchemaTarget::Discover => "discover",
+            SchemaTarget::Get => "get",
+            SchemaTarget::Set => "set",
+            SchemaTarget::Describe => "describe",
+            SchemaTarget::Raw => "raw",
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -179,6 +210,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
                 Duration::from_millis(timeout_ms),
             )
         }
+        Command::Schema { target } => Ok(schema::for_target(target.map(SchemaTarget::as_str))),
     }
 }
 
