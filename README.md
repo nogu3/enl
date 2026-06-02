@@ -22,7 +22,7 @@ RUST_LOG=debug task run -- discover       # 診断ログを stderr に
 
 ### Docker (ローカル toolchain 不要)
 
-3610 番ポート専有 + マルチキャスト受信のため **host network 必須**（bridge では機器応答を受信できない）。
+3610 番ポート専有のため **host network 必須**（bridge では機器応答を受信できない。discover も各ホストへ unicast する CIDR sweep 方式）。
 
 ```bash
 task docker:build                   # 実行イメージをビルド
@@ -66,7 +66,16 @@ task docker:test   # Docker 内テスト (toolchain 不要)
 
 - `src/codec.rs` — フレームのデータモデル + parse/build。依存ゼロ手書き。ラウンドトリップテストで非対称バグを防ぐ。
 - `src/properties.rs` — 任意のデコードレイヤ。プロパティマップ (15以下/16以上の2形式) パーサ含む。
-- `src/net.rs` — UDP ソケット層 (0.0.0.0:3610 専有、マルチキャスト join)。
+- `src/net.rs` — UDP ソケット層 (0.0.0.0:3610 専有)。discover は CIDR sweep（各ホストへ unicast Get）。
 - `src/commands.rs` — discover / get / set / describe。
 - `src/error.rs` — 機械可読エラー + exit code。
 - `src/main.rs` — clap CLI。
+
+## Roadmap
+
+コア（discover / get / set / describe）は実機検証済み。今後の候補:
+
+- [ ] デコード辞書の拡充 — `82` 規格Version、`8A` メーカコード（→ 社名）、機器クラス別の頻出 EPC（雨戸 `E0`/`E1` 等）。辞書になければ生 hex を返す方針は維持。
+- [ ] `raw` サブコマンド — 任意 ESV/EPC/EDT を生で送り生応答 hex を返す。デバッグ・未対応操作の逃げ道。
+- [ ] INF 通知待受 — 機器発の状変通知（ESV `0x73`）をブロッキング recv で一定時間拾う。
+- [ ] 出力スキーマの安定化 — LLM / `jq` が依存するためバージョン間で破壊しない。
