@@ -264,13 +264,68 @@ pub fn build_property_map(epcs: &[u8]) -> Vec<u8> {
     }
 }
 
-/// edt を常に hex で、デコードできれば value を併記した JSON を返す。
+/// 全機器共通 EPC (スーパークラス) の正規名。
+const COMMON_EPC: &[(u8, &str)] = &[
+    (0x80, "power"),
+    (0x82, "standard_version"),
+    (0x8A, "manufacturer"),
+    (0x9D, "status_change_map"),
+    (0x9E, "set_property_map"),
+    (0x9F, "get_property_map"),
+];
+
+/// 家庭用エアコン (0x0130) 固有 EPC の正規名。
+const AIRCON_EPC: &[(u8, &str)] = &[
+    (0xA0, "air_flow"),
+    (0xB0, "operation_mode"),
+    (0xB3, "target_temperature"),
+    (0xBB, "room_temperature"),
+];
+
+/// 電動雨戸・シャッター (0x0263) 固有 EPC の正規名。
+const SHUTTER_EPC: &[(u8, &str)] = &[
+    (0xE0, "open_close_operation"),
+    (0xE1, "open_level"),
+    (0xEA, "open_close_state"),
+];
+
+/// EOJ のクラスに対応する固有 EPC 名テーブル。未対応クラスは空。
+fn class_epc_table(eoj: Eoj) -> &'static [(u8, &'static str)] {
+    match (eoj.class_group(), eoj.class()) {
+        (0x01, 0x30) => AIRCON_EPC,
+        (0x02, 0x63) => SHUTTER_EPC,
+        _ => &[],
+    }
+}
+
+/// EPC → 正規名。クラス固有を優先し、無ければ共通から引く。未知は None。
+pub fn epc_name(eoj: Eoj, epc: u8) -> Option<&'static str> {
+    class_epc_table(eoj)
+        .iter()
+        .chain(COMMON_EPC)
+        .find(|(e, _)| *e == epc)
+        .map(|(_, n)| *n)
+}
+
+/// 正規名 → EPC。クラス固有を優先。未知は None。
+pub fn epc_for_name(eoj: Eoj, name: &str) -> Option<u8> {
+    class_epc_table(eoj)
+        .iter()
+        .chain(COMMON_EPC)
+        .find(|(_, n)| *n == name)
+        .map(|(e, _)| *e)
+}
+
+/// edt を常に hex で、名前/デコード値があれば併記した JSON を返す。
 pub fn property_json(eoj: Eoj, epc: u8, edt: &[u8]) -> Value {
     let mut obj = json!({
         "epc": format!("{epc:02X}"),
         "pdc": edt.len(),
         "edt_hex": bytes_to_hex(edt),
     });
+    if let Some(name) = epc_name(eoj, epc) {
+        obj["name"] = json!(name);
+    }
     if let Some(value) = decode(eoj, epc, edt) {
         obj["value"] = value;
     }
@@ -422,5 +477,40 @@ mod tests {
         let eoj = Eoj([0x01, 0x30, 1]);
         assert_eq!(decode(eoj, 0xA0, &[0x41]).unwrap()["air_flow"], "auto");
         assert_eq!(decode(eoj, 0xA0, &[0x33]).unwrap()["air_flow_level"], 3);
+    }
+
+    #[test]
+    fn epc_name_common_and_class() {
+        let shutter = Eoj([0x02, 0x63, 1]);
+        let aircon = Eoj([0x01, 0x30, 1]);
+        // 共通
+        assert_eq!(epc_name(shutter, 0x8A), Some("manufacturer"));
+        // クラス固有
+        assert_eq!(epc_name(shutter, 0xEA), Some("open_close_state"));
+        assert_eq!(epc_name(aircon, 0xB0), Some("operation_mode"));
+        // 雨戸の EA はエアコンでは未知
+        assert_eq!(epc_name(aircon, 0xEA), None);
+        // 未知 EPC
+        assert_eq!(epc_name(shutter, 0x77), None);
+    }
+
+    #[test]
+    fn epc_for_name_roundtrip() {
+        let aircon = Eoj([0x01, 0x30, 1]);
+        assert_eq!(epc_for_name(aircon, "operation_mode"), Some(0xB0));
+        assert_eq!(epc_for_name(aircon, "power"), Some(0x80));
+        assert_eq!(epc_for_name(aircon, "open_close_state"), None);
+        assert_eq!(epc_for_name(aircon, "bogus"), None);
+        // name → epc → name の往復
+        let epc = epc_for_name(aircon, "room_temperature").unwrap();
+        assert_eq!(epc_name(aircon, epc), Some("room_temperature"));
+    }
+
+    #[test]
+    fn property_json_includes_name() {
+        let v = property_json(Eoj([0x01, 0x30, 1]), 0xB0, &[0x42]);
+        assert_eq!(v["epc"], "B0");
+        assert_eq!(v["name"], "operation_mode");
+        assert_eq!(v["value"]["operation_mode"], "cool");
     }
 }

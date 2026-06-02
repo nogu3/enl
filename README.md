@@ -35,9 +35,9 @@ task docker:run -- discover         # host network で enl 実行
 ## サブコマンドと出力スキーマ
 
 - `discover [--timeout-ms 3000]` — `{"devices":[{"ip","count","instances":[...]}]}`
-- `get <ip> <eoj> <epc...> [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","pdc","edt_hex","value?"}]}`
+- `get <ip> <eoj> <epc...> [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","name?","pdc","edt_hex","value?"}]}`
 - `set <ip> <eoj> <epc> <edt> [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted","properties":[...]}`
-- `describe <ip> <eoj> [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[...],"set_map":[...],"inf_map":[...]}`
+- `describe <ip> <eoj> [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[{"epc","name?"}],"set_map":[...],"inf_map":[...]}`
 - `raw <ip> <deoj> <esv> [epc[:edt]...] [--seoj 05FF01] [--timeout-ms 2000]` — 任意 ESV/EPC/EDT を生送信。`{"ip","sent_hex","response_hex","frame?":{...}}`。SNA もエラーにせず `response_hex` を返す（デバッグ / 未対応操作の逃げ道）。応答パース失敗時は `parse_error` を併記。
 
 ```bash
@@ -45,7 +45,12 @@ task run -- raw 192.0.2.10 013001 62 80          # Get 0x80 を生送信
 task run -- raw 192.0.2.10 013001 61 80:30       # SetC 0x80=ON
 ```
 
-`eoj`/`epc`/`edt` は hex。バイナリ値は常に `edt_hex` を含み、デコード辞書にあれば `value` を併記する。
+`eoj`/`edt` は hex。`epc` は hex（`80`）でも正規名（`power` / `operation_mode` / `open_close_state` 等）でも指定でき、名前はクラス固有を優先して解決する（`raw` は生送信が目的なので hex のみ）。バイナリ値は常に `edt_hex` を含み、デコード辞書にあれば `value`、EPC 名が既知なら `name` を併記する。
+
+```bash
+task run -- get 192.0.2.10 013001 power operation_mode room_temperature  # 名前で指定
+task run -- set 192.0.2.10 026301 open_close_operation 42                # 雨戸を閉
+```
 
 ## exit code (cron / n8n が分岐できる)
 

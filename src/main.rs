@@ -132,7 +132,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             timeout_ms,
         } => {
             let eoj = parse_eoj(&eoj)?;
-            let epcs = parse_epcs(&epc)?;
+            let epcs = resolve_epcs(eoj, &epc)?;
             commands::get(ip, eoj, &epcs, Duration::from_millis(timeout_ms))
         }
         Command::Set {
@@ -143,7 +143,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             timeout_ms,
         } => {
             let eoj = parse_eoj(&eoj)?;
-            let epc = parse_epc_one(&epc)?;
+            let epc = resolve_epc(eoj, &epc)?;
             let edt = codec::hex_to_bytes(&edt)
                 .map_err(|e| AppError::new(ErrKind::Internal, format!("EDT hex 不正: {e}")))?;
             commands::set(ip, eoj, epc, edt, Duration::from_millis(timeout_ms))
@@ -216,8 +216,22 @@ fn parse_eoj(s: &str) -> Result<Eoj, AppError> {
     Eoj::from_hex(s).map_err(|e| AppError::new(ErrKind::Internal, format!("EOJ 不正: {e}")))
 }
 
-fn parse_epcs(items: &[String]) -> Result<Vec<u8>, AppError> {
-    items.iter().map(|s| parse_epc_one(s)).collect()
+fn resolve_epcs(eoj: Eoj, items: &[String]) -> Result<Vec<u8>, AppError> {
+    items.iter().map(|s| resolve_epc(eoj, s)).collect()
+}
+
+/// EPC トークンを解決する。正規名 (例 power, operation_mode) を優先し、
+/// 名前に無ければ 2 hex 桁として解釈する。raw は生送信が目的なので対象外。
+fn resolve_epc(eoj: Eoj, token: &str) -> Result<u8, AppError> {
+    if let Some(epc) = properties::epc_for_name(eoj, token) {
+        return Ok(epc);
+    }
+    parse_epc_one(token).map_err(|_| {
+        AppError::new(
+            ErrKind::Internal,
+            format!("EPC 解決失敗 '{token}' (既知の名前でも 2 hex 桁でもない)"),
+        )
+    })
 }
 
 fn parse_epc_one(s: &str) -> Result<u8, AppError> {
@@ -268,5 +282,27 @@ mod tests {
     fn parse_prop_arg_errors() {
         assert!(parse_prop_arg("8030:30").is_err()); // EPC は 1 バイト
         assert!(parse_prop_arg("80:zz").is_err()); // EDT hex 不正
+    }
+
+    #[test]
+    fn resolve_epc_name_or_hex() {
+        let aircon = Eoj::from_hex("013001").unwrap();
+        // 正規名
+        assert_eq!(resolve_epc(aircon, "operation_mode").unwrap(), 0xB0);
+        assert_eq!(resolve_epc(aircon, "power").unwrap(), 0x80);
+        // hex フォールバック
+        assert_eq!(resolve_epc(aircon, "B0").unwrap(), 0xB0);
+        assert_eq!(resolve_epc(aircon, "ff").unwrap(), 0xFF);
+        // 名前でも hex でもない
+        assert!(resolve_epc(aircon, "bogus").is_err());
+    }
+
+    #[test]
+    fn resolve_epc_is_class_scoped() {
+        // open_close_state は雨戸クラスのみ。エアコンでは解決不可。
+        let aircon = Eoj::from_hex("013001").unwrap();
+        let shutter = Eoj::from_hex("026301").unwrap();
+        assert_eq!(resolve_epc(shutter, "open_close_state").unwrap(), 0xEA);
+        assert!(resolve_epc(aircon, "open_close_state").is_err());
     }
 }
