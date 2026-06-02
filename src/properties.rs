@@ -29,6 +29,12 @@ pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
             return Some(v);
         }
     }
+    // 家庭用エアコン (0x0130) 固有
+    if eoj.class_group() == 0x01 && eoj.class() == 0x30 {
+        if let Some(v) = decode_aircon(epc, edt) {
+            return Some(v);
+        }
+    }
     None
 }
 
@@ -102,6 +108,38 @@ fn manufacturer_name(code: u32) -> Option<&'static str> {
         0x00006C => "ニチコン",
         _ => return None,
     })
+}
+
+/// 家庭用エアコン (0x0130) 固有 EPC のデコード。
+fn decode_aircon(epc: u8, edt: &[u8]) -> Option<Value> {
+    match epc {
+        // 0xB0 運転モード設定: 自動/冷房/暖房/除湿/送風/その他
+        0xB0 => Some(json!({
+            "operation_mode": match edt.first() {
+                Some(0x41) => "auto",
+                Some(0x42) => "cool",
+                Some(0x43) => "heat",
+                Some(0x44) => "dry",
+                Some(0x45) => "fan",
+                Some(0x40) => "other",
+                _ => "unknown",
+            }
+        })),
+        // 0xB3 温度設定値: unsigned ℃ (0x00-0x32)、0xFD=設定値不明
+        0xB3 => edt.first().map(|&v| match v {
+            0xFD => json!({ "temp_setpoint_c": Value::Null }),
+            _ => json!({ "temp_setpoint_c": v }),
+        }),
+        // 0xBB 室内温度計測値: signed ℃
+        0xBB => edt.first().map(|&v| json!({ "room_temp_c": v as i8 })),
+        // 0xA0 風量設定: 自動=0x41 / レベル 0x31-0x38 (1-8)
+        0xA0 => match edt.first() {
+            Some(0x41) => Some(json!({ "air_flow": "auto" })),
+            Some(&v @ 0x31..=0x38) => Some(json!({ "air_flow_level": v - 0x30 })),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// 電動雨戸・シャッター (0x0263) 固有 EPC のデコード。
@@ -352,5 +390,36 @@ mod tests {
     fn shutter_epc_only_applies_to_shutter_class() {
         // 0xE0 は雨戸クラス以外では未知 EPC 扱い
         assert!(decode(Eoj([0x01, 0x30, 1]), 0xE0, &[0x41]).is_none());
+    }
+
+    #[test]
+    fn aircon_operation_mode() {
+        let eoj = Eoj([0x01, 0x30, 1]);
+        assert_eq!(decode(eoj, 0xB0, &[0x42]).unwrap()["operation_mode"], "cool");
+        assert_eq!(decode(eoj, 0xB0, &[0x43]).unwrap()["operation_mode"], "heat");
+        assert_eq!(decode(eoj, 0xB0, &[0x40]).unwrap()["operation_mode"], "other");
+    }
+
+    #[test]
+    fn aircon_temp_setpoint() {
+        let eoj = Eoj([0x01, 0x30, 1]);
+        assert_eq!(decode(eoj, 0xB3, &[0x1A]).unwrap()["temp_setpoint_c"], 26);
+        // 0xFD = 設定値不明 → null
+        assert!(decode(eoj, 0xB3, &[0xFD]).unwrap()["temp_setpoint_c"].is_null());
+    }
+
+    #[test]
+    fn aircon_room_temp_signed() {
+        let eoj = Eoj([0x01, 0x30, 1]);
+        assert_eq!(decode(eoj, 0xBB, &[0x19]).unwrap()["room_temp_c"], 25);
+        // 0xFB = -5℃ (signed)
+        assert_eq!(decode(eoj, 0xBB, &[0xFB]).unwrap()["room_temp_c"], -5);
+    }
+
+    #[test]
+    fn aircon_air_flow() {
+        let eoj = Eoj([0x01, 0x30, 1]);
+        assert_eq!(decode(eoj, 0xA0, &[0x41]).unwrap()["air_flow"], "auto");
+        assert_eq!(decode(eoj, 0xA0, &[0x33]).unwrap()["air_flow_level"], 3);
     }
 }
