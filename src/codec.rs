@@ -57,11 +57,11 @@ impl fmt::Debug for Eoj {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Esv {
     // 要求
-    SetI,      // 0x60
-    SetC,      // 0x61
-    Get,       // 0x62
-    InfReq,    // 0x63
-    SetGet,    // 0x6E
+    SetI,   // 0x60
+    SetC,   // 0x61
+    Get,    // 0x62
+    InfReq, // 0x63
+    SetGet, // 0x6E
     // 応答 / 通知
     SetRes,    // 0x71
     GetRes,    // 0x72
@@ -133,6 +133,11 @@ impl Esv {
         (self.to_u8() & 0xF0) == 0x50
     }
 
+    /// 応答 / 通知 (Set_Res, Get_Res, INF, INFC, INFC_Res, SetGet_Res)。ESV 上位ニブル 0x7。
+    pub fn is_response(self) -> bool {
+        (self.to_u8() & 0xF0) == 0x70
+    }
+
     /// 仕様上の短い名前 (JSON 用)。
     pub fn name(self) -> String {
         match self {
@@ -155,7 +160,10 @@ impl Property {
     }
     /// Get 要求用: EDT 無し (PDC=0)。
     pub fn get(epc: u8) -> Property {
-        Property { epc, edt: Vec::new() }
+        Property {
+            epc,
+            edt: Vec::new(),
+        }
     }
     pub fn pdc(&self) -> u8 {
         self.edt.len() as u8
@@ -200,7 +208,12 @@ impl Frame {
             ehd1: EHD1,
             ehd2: EHD2_FORMAT1,
             tid,
-            edata: Edata::Standard { seoj, deoj, esv, props },
+            edata: Edata::Standard {
+                seoj,
+                deoj,
+                esv,
+                props,
+            },
         }
     }
 
@@ -280,7 +293,13 @@ pub fn parse(buf: &[u8]) -> Result<Frame, CodecError> {
             ehd1,
             ehd2,
             tid,
-            edata: Edata::SetGet { seoj, deoj, esv, set_props, get_props },
+            edata: Edata::SetGet {
+                seoj,
+                deoj,
+                esv,
+                set_props,
+                get_props,
+            },
         })
     } else {
         let props = parse_block(&mut c, "OPC")?;
@@ -288,7 +307,12 @@ pub fn parse(buf: &[u8]) -> Result<Frame, CodecError> {
             ehd1,
             ehd2,
             tid,
-            edata: Edata::Standard { seoj, deoj, esv, props },
+            edata: Edata::Standard {
+                seoj,
+                deoj,
+                esv,
+                props,
+            },
         })
     }
 }
@@ -316,13 +340,24 @@ pub fn build(frame: &Frame) -> Vec<u8> {
     out.extend_from_slice(&frame.tid.to_be_bytes());
     match &frame.edata {
         Edata::Arbitrary(bytes) => out.extend_from_slice(bytes),
-        Edata::Standard { seoj, deoj, esv, props } => {
+        Edata::Standard {
+            seoj,
+            deoj,
+            esv,
+            props,
+        } => {
             out.extend_from_slice(&seoj.0);
             out.extend_from_slice(&deoj.0);
             out.push(esv.to_u8());
             build_block(&mut out, props);
         }
-        Edata::SetGet { seoj, deoj, esv, set_props, get_props } => {
+        Edata::SetGet {
+            seoj,
+            deoj,
+            esv,
+            set_props,
+            get_props,
+        } => {
             out.extend_from_slice(&seoj.0);
             out.extend_from_slice(&deoj.0);
             out.push(esv.to_u8());
@@ -517,13 +552,19 @@ mod tests {
         assert!(matches!(parse(&[0x10]), Err(CodecError::Truncated(_))));
         assert!(matches!(parse(&[]), Err(CodecError::Truncated(_))));
         // PDC が EDT 長を超過
-        let bad = vec![0x10, 0x81, 0x00, 0x01, 0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x62, 0x01, 0x80, 0x05, 0x01];
+        let bad = vec![
+            0x10, 0x81, 0x00, 0x01, 0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x62, 0x01, 0x80, 0x05,
+            0x01,
+        ];
         assert!(matches!(parse(&bad), Err(CodecError::Truncated(_))));
     }
 
     #[test]
     fn bad_ehd1_errors() {
-        assert!(matches!(parse(&[0x20, 0x81, 0, 0]), Err(CodecError::BadEhd1(0x20))));
+        assert!(matches!(
+            parse(&[0x20, 0x81, 0, 0]),
+            Err(CodecError::BadEhd1(0x20))
+        ));
     }
 
     #[test]

@@ -46,7 +46,11 @@ pub struct AppError {
 
 impl AppError {
     pub fn new(kind: ErrKind, detail: impl Into<String>) -> AppError {
-        AppError { kind, detail: detail.into(), extra: None }
+        AppError {
+            kind,
+            detail: detail.into(),
+            extra: None,
+        }
     }
 
     pub fn with_extra(mut self, extra: serde_json::Value) -> AppError {
