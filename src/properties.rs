@@ -120,6 +120,16 @@ fn decode_enum(p: &EnumProp, edt: &[u8]) -> Value {
     Value::Object(obj)
 }
 
+/// enum 型 EPC の意味名 → バイト値 (例 close → 0x42)。set の値名指定用。
+/// 数値型・未対応 EPC や未知の名前は None。
+pub fn edt_for_name(eoj: Eoj, epc: u8, name: &str) -> Option<u8> {
+    enum_prop(eoj, epc)?
+        .values
+        .iter()
+        .find(|(_, m)| *m == name)
+        .map(|(v, _)| *v)
+}
+
 /// enum 型 EPC の値域 (バイト hex → 意味) を JSON で返す。describe の values 用。
 /// 数値型・未対応 EPC は None。
 pub fn epc_values(eoj: Eoj, epc: u8) -> Option<Value> {
