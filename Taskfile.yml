@@ -3,6 +3,7 @@
 #   task                 タスク一覧
 #   task build           ローカル release ビルド (要 Rust toolchain)
 #   task run -- discover  ビルド済バイナリで enl を実行
+#   task install         ~/.cargo/bin に enl をインストール
 #   task test            ローカルテスト
 #   task docker:test     Docker 上でテスト (ローカル toolchain 不要)
 #
@@ -60,6 +61,16 @@ tasks:
     deps: [build]
     cmds:
       - '{{.BIN}} {{.CLI_ARGS}}'
+
+  install:
+    desc: '~/.cargo/bin に enl をインストール (release 最適化)'
+    cmds:
+      - cargo install --path .
+
+  uninstall:
+    desc: '~/.cargo/bin から enl を削除'
+    cmds:
+      - cargo uninstall enl
 
   test:
     desc: テスト (codec ラウンドトリップ等)
