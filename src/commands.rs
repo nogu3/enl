@@ -129,7 +129,7 @@ fn resolve_cidr(cidr: Option<&str>, iface: Option<Ipv4Addr>) -> Result<(Ipv4Addr
     }
     Err(AppError::new(
         ErrKind::Internal,
-        "--cidr <CIDR> もしくは -i <IPv4> のいずれかが必要 (例: --cidr 192.168.1.0/24)",
+        "--cidr <CIDR> もしくは -i <IPv4> のいずれかが必要 (例: --cidr 192.0.2.0/24)",
     ))
 }
 
@@ -411,8 +411,8 @@ mod tests {
     #[test]
     fn parse_cidr_basic() {
         assert_eq!(
-            parse_cidr("192.168.1.0/24").unwrap(),
-            (Ipv4Addr::new(192, 168, 1, 0), 24)
+            parse_cidr("192.0.2.0/24").unwrap(),
+            (Ipv4Addr::new(192, 0, 2, 0), 24)
         );
         assert_eq!(
             parse_cidr("10.0.0.0/8").unwrap(),
@@ -422,8 +422,8 @@ mod tests {
 
     #[test]
     fn parse_cidr_errors() {
-        assert!(parse_cidr("192.168.1.0").is_err());
-        assert!(parse_cidr("192.168.1.0/33").is_err());
+        assert!(parse_cidr("192.0.2.0").is_err());
+        assert!(parse_cidr("192.0.2.0/33").is_err());
         assert!(parse_cidr("nope/24").is_err());
     }
 
