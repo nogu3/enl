@@ -28,7 +28,7 @@ use error::{AppError, ErrKind};
 )]
 struct Cli {
     /// ローカル IPv4 (discover で CIDR 省略時に /24 を自動推定するのに使う)。
-    /// 例: -i 192.168.1.130 → 192.168.1.0/24 を sweep。
+    /// 例: -i 192.0.2.130 → 192.0.2.0/24 を sweep。
     #[arg(short = 'i', long = "iface", global = true)]
     iface: Option<Ipv4Addr>,
 
@@ -40,7 +40,7 @@ struct Cli {
 enum Command {
     /// CIDR sweep でノードを探索 (各ホストへ unicast Get 0EF001 D6)。
     Discover {
-        /// 探索する CIDR (例: 192.168.1.0/24)。省略時は -i のローカル IP から /24 を推定。
+        /// 探索する CIDR (例: 192.0.2.0/24)。省略時は -i のローカル IP から /24 を推定。
         #[arg(long)]
         cidr: Option<String>,
         /// 応答収集ウィンドウ (ミリ秒)。
