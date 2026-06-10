@@ -10,7 +10,7 @@ const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
 /// 対象サブコマンド名 (網羅性テスト用)。
 #[cfg(test)]
-const TARGETS: [&str; 5] = ["discover", "get", "set", "describe", "raw"];
+const TARGETS: [&str; 6] = ["discover", "get", "set", "describe", "raw", "listen"];
 
 /// 名前指定があればそのスキーマ、無ければ全サブコマンドのスキーマ集約。
 pub fn for_target(target: Option<&str>) -> Value {
@@ -20,6 +20,7 @@ pub fn for_target(target: Option<&str>) -> Value {
         Some("set") => set(),
         Some("describe") => describe(),
         Some("raw") => raw(),
+        Some("listen") => listen(),
         // CLI 側 (ValueEnum) で未知値は弾かれるため、ここには来ない。
         Some(_) | None => all(),
     }
@@ -33,6 +34,7 @@ fn all() -> Value {
         "set": set(),
         "describe": describe(),
         "raw": raw(),
+        "listen": listen(),
     })
 }
 
@@ -203,6 +205,35 @@ fn raw() -> Value {
             "parse_error": { "type": "string", "description": "応答をパースできなかった場合のみ" }
         },
         "required": ["ip", "sent_hex", "response_hex"],
+        "additionalProperties": false
+    })
+}
+
+/// `enl listen` の出力スキーマ。INF / INFC 通知の収集結果。
+fn listen() -> Value {
+    json!({
+        "$schema": DIALECT,
+        "title": "enl listen output",
+        "type": "object",
+        "properties": {
+            "events": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "ip": { "type": "string", "description": "通知の送信元 IP" },
+                        "tid": { "type": "string", "description": "TID (4 hex 桁)" },
+                        "seoj": { "type": "string", "description": "通知元 EOJ (6 hex 桁)" },
+                        "deoj": { "type": "string" },
+                        "esv": { "type": "string", "enum": ["Inf", "InfC"] },
+                        "properties": { "type": "array", "items": property() }
+                    },
+                    "required": ["ip", "tid", "seoj", "deoj", "esv", "properties"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["events"],
         "additionalProperties": false
     })
 }

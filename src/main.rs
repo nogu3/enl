@@ -97,6 +97,28 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
+    /// INF / INFC 通知を待ち受ける (one-shot: count 件かタイムアウトで終了)。
+    ///
+    /// 3610 を bind し 224.0.23.0 に join して通知を収集する。1 件以上集まれば
+    /// 成功、0 件のままタイムアウトすると exit 3。状変連動 (「照明が消えたら〜」)
+    /// はこのコマンドを外部のループ (cron / n8n / シェル) から回して組む。
+    Listen {
+        /// 収集する通知数。達したら即終了。
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// 待受時間 (ミリ秒)。0 で無期限 (count 件集まるまで待つ)。
+        #[arg(long, default_value_t = 60000)]
+        timeout_ms: u64,
+        /// 送信元 IP でフィルタ。
+        #[arg(long)]
+        from: Option<IpAddr>,
+        /// SEOJ でフィルタ (4 hex 桁=クラス一致 例 0291, 6 hex 桁=完全一致)。
+        #[arg(long)]
+        eoj: Option<String>,
+        /// この EPC を含む通知のみ採用 (2 hex 桁, 例 80)。
+        #[arg(long)]
+        epc: Option<String>,
+    },
     /// 各サブコマンドの stdout 出力スキーマ (JSON Schema) を出す。ネットワーク不要。
     ///
     /// 出力スキーマは安定契約。LLM の function-calling / `jq` がこれをスキーマ取得に使える。
@@ -115,6 +137,7 @@ enum SchemaTarget {
     Set,
     Describe,
     Raw,
+    Listen,
 }
 
 impl SchemaTarget {
@@ -125,6 +148,7 @@ impl SchemaTarget {
             SchemaTarget::Set => "set",
             SchemaTarget::Describe => "describe",
             SchemaTarget::Raw => "raw",
+            SchemaTarget::Listen => "listen",
         }
     }
 }
@@ -209,6 +233,25 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
                 props,
                 Duration::from_millis(timeout_ms),
             )
+        }
+        Command::Listen {
+            count,
+            timeout_ms,
+            from,
+            eoj,
+            epc,
+        } => {
+            if count == 0 {
+                return Err(AppError::new(ErrKind::Internal, "--count は 1 以上"));
+            }
+            let eoj_filter = eoj
+                .as_deref()
+                .map(commands::EojFilter::from_hex)
+                .transpose()?;
+            let epc = epc.as_deref().map(parse_epc_one).transpose()?;
+            // 0 は無期限 (count 件集まるまで待つ)。
+            let timeout = (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms));
+            commands::listen(iface, count, timeout, from, eoj_filter, epc)
         }
         Command::Schema { target } => Ok(schema::for_target(target.map(SchemaTarget::as_str))),
     }
