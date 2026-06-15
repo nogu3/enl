@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
@@ -314,6 +314,166 @@ pub fn raw(
     Ok(out)
 }
 
+/// listen の SEOJ フィルタ。4 hex 桁ならクラス一致、6 hex 桁なら完全一致。
+pub enum EojFilter {
+    Class(u8, u8),
+    Exact(Eoj),
+}
+
+impl EojFilter {
+    /// "0291" (クラス) もしくは "029101" (完全一致) から生成。
+    pub fn from_hex(s: &str) -> Result<EojFilter, AppError> {
+        let bytes = codec::hex_to_bytes(s)
+            .map_err(|e| AppError::new(ErrKind::Internal, format!("EOJ フィルタ hex 不正: {e}")))?;
+        match bytes.len() {
+            2 => Ok(EojFilter::Class(bytes[0], bytes[1])),
+            3 => Ok(EojFilter::Exact(Eoj([bytes[0], bytes[1], bytes[2]]))),
+            _ => Err(AppError::new(
+                ErrKind::Internal,
+                "EOJ フィルタは 4 hex 桁 (クラス) か 6 hex 桁 (完全一致)",
+            )),
+        }
+    }
+
+    fn matches(&self, eoj: Eoj) -> bool {
+        match self {
+            EojFilter::Class(g, c) => eoj.class_group() == *g && eoj.class() == *c,
+            EojFilter::Exact(e) => eoj == *e,
+        }
+    }
+}
+
+/// INF / INFC 通知を待ち受けて収集する (one-shot: count 件か deadline で終了)。
+///
+/// 3610 を bind し 224.0.23.0 に join して INF (0x73) / INFC (0x74) のみ採用する。
+/// INFC には仕様上の応答 (INFC_Res) を best-effort で返す。
+/// deadline までに 1 件も来なければ timeout (exit 3)、1 件以上あれば成功。
+pub fn listen(
+    iface: Option<Ipv4Addr>,
+    count: usize,
+    timeout: Option<Duration>,
+    from: Option<IpAddr>,
+    eoj_filter: Option<EojFilter>,
+    epc: Option<u8>,
+) -> Result<Value, AppError> {
+    let socket = net::open_socket()?;
+    net::join_multicast(&socket, iface)?;
+    let deadline = timeout.map(|t| Instant::now() + t);
+    tracing::info!(
+        count,
+        timeout_ms = timeout.map(|t| t.as_millis() as u64),
+        "INF 待受開始"
+    );
+
+    let mut events = Vec::new();
+    while events.len() < count {
+        let dg = match net::recv_one(&socket, deadline)? {
+            Some(dg) => dg,
+            None => break, // deadline 到達
+        };
+        let frame = match codec::parse(&dg.data) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!(from = %dg.from, error = %e, "パース不能フレームをスキップ");
+                continue;
+            }
+        };
+        match inf_event(
+            dg.from.ip(),
+            &frame,
+            from.as_ref(),
+            eoj_filter.as_ref(),
+            epc,
+        ) {
+            Some(event) => {
+                tracing::info!(from = %dg.from, "INF 受信");
+                reply_infc_res(&socket, dg.from.ip(), &frame);
+                events.push(event);
+            }
+            None => {
+                tracing::debug!(from = %dg.from, "対象外フレームをスキップ");
+            }
+        }
+    }
+
+    if events.is_empty() {
+        let ms = timeout.map(|t| t.as_millis()).unwrap_or(0);
+        return Err(AppError::new(
+            ErrKind::Timeout,
+            format!("INF 通知なし ({ms}ms)"),
+        ));
+    }
+    Ok(json!({ "events": events }))
+}
+
+/// 受信フレームが採用すべき INF / INFC 通知なら event JSON にする。
+/// 非通知 ESV・フィルタ不一致は None。
+fn inf_event(
+    src: IpAddr,
+    frame: &Frame,
+    from: Option<&IpAddr>,
+    eoj_filter: Option<&EojFilter>,
+    epc: Option<u8>,
+) -> Option<Value> {
+    let (seoj, deoj, esv, props) = match &frame.edata {
+        Edata::Standard {
+            seoj,
+            deoj,
+            esv,
+            props,
+        } => (*seoj, *deoj, *esv, props),
+        _ => return None,
+    };
+    if !matches!(esv, Esv::Inf | Esv::InfC) {
+        return None;
+    }
+    if from.is_some_and(|ip| *ip != src) {
+        return None;
+    }
+    if eoj_filter.is_some_and(|f| !f.matches(seoj)) {
+        return None;
+    }
+    if epc.is_some_and(|e| !props.iter().any(|p| p.epc == e)) {
+        return None;
+    }
+    let properties: Vec<Value> = props
+        .iter()
+        .map(|p| property_json(seoj, p.epc, &p.edt))
+        .collect();
+    Some(json!({
+        "ip": src.to_string(),
+        "tid": format!("{:04x}", frame.tid),
+        "seoj": seoj.to_hex(),
+        "deoj": deoj.to_hex(),
+        "esv": esv.name(),
+        "properties": properties,
+    }))
+}
+
+/// INFC (0x74) は応答必須なので INFC_Res を返す。失敗しても収集は止めない。
+fn reply_infc_res(socket: &std::net::UdpSocket, src: IpAddr, frame: &Frame) {
+    let (seoj, esv, props) = match &frame.edata {
+        Edata::Standard {
+            seoj, esv, props, ..
+        } => (*seoj, *esv, props),
+        _ => return,
+    };
+    if esv != Esv::InfC {
+        return;
+    }
+    let res = Frame::standard(
+        frame.tid,
+        CONTROLLER,
+        seoj,
+        Esv::InfCRes,
+        props.iter().map(|p| Property::get(p.epc)).collect(),
+    );
+    let dst = SocketAddr::new(src, net::ECHONET_PORT);
+    if let Err(e) = socket.send_to(&codec::build(&res), dst) {
+        tracing::warn!(%src, error = %e, "INFC_Res 送信失敗 (continue)");
+    }
+}
+
 /// Frame をロスレスに JSON へダンプ (raw 用)。EDT デコードは応答 SEOJ 基準で best-effort。
 fn frame_to_json(frame: &Frame) -> Value {
     let props_json = |seoj: Eoj, props: &[Property]| -> Vec<Value> {
@@ -469,5 +629,71 @@ mod tests {
     #[test]
     fn resolve_cidr_neither_errors() {
         assert!(resolve_cidr(None, None).is_err());
+    }
+
+    #[test]
+    fn eoj_filter_class_and_exact() {
+        let light = Eoj([0x02, 0x91, 0x01]);
+        let class = EojFilter::from_hex("0291").unwrap();
+        assert!(class.matches(light));
+        assert!(class.matches(Eoj([0x02, 0x91, 0x02]))); // 別インスタンスも一致
+        assert!(!class.matches(Eoj([0x01, 0x30, 0x01])));
+
+        let exact = EojFilter::from_hex("029101").unwrap();
+        assert!(exact.matches(light));
+        assert!(!exact.matches(Eoj([0x02, 0x91, 0x02])));
+
+        assert!(EojFilter::from_hex("02").is_err());
+        assert!(EojFilter::from_hex("zz").is_err());
+    }
+
+    /// 単機能照明 (029101) からの INF 0x80=OFF 通知フレーム。
+    fn inf_frame(esv: Esv) -> Frame {
+        Frame::standard(
+            0x00AB,
+            Eoj([0x02, 0x91, 0x01]),
+            NODE_PROFILE,
+            esv,
+            vec![Property::new(0x80, vec![0x31])],
+        )
+    }
+
+    #[test]
+    fn inf_event_accepts_inf_and_decodes() {
+        let src: IpAddr = "192.0.2.20".parse().unwrap();
+        let ev = inf_event(src, &inf_frame(Esv::Inf), None, None, None).unwrap();
+        assert_eq!(ev["ip"], "192.0.2.20");
+        assert_eq!(ev["tid"], "00ab");
+        assert_eq!(ev["seoj"], "029101");
+        assert_eq!(ev["esv"], "Inf");
+        assert_eq!(ev["properties"][0]["epc"], "80");
+        assert_eq!(ev["properties"][0]["edt_hex"], "31");
+        // スーパークラス共通辞書 (power) でデコードされる
+        assert_eq!(ev["properties"][0]["value"]["power"], "off");
+    }
+
+    #[test]
+    fn inf_event_rejects_non_notification() {
+        let src: IpAddr = "192.0.2.20".parse().unwrap();
+        assert!(inf_event(src, &inf_frame(Esv::GetRes), None, None, None).is_none());
+        assert!(inf_event(src, &inf_frame(Esv::Get), None, None, None).is_none());
+    }
+
+    #[test]
+    fn inf_event_filters() {
+        let src: IpAddr = "192.0.2.20".parse().unwrap();
+        let other: IpAddr = "192.0.2.99".parse().unwrap();
+        let f = inf_frame(Esv::Inf);
+        // from フィルタ
+        assert!(inf_event(src, &f, Some(&src), None, None).is_some());
+        assert!(inf_event(src, &f, Some(&other), None, None).is_none());
+        // eoj フィルタ (クラス / 完全一致 / 不一致)
+        let class = EojFilter::from_hex("0291").unwrap();
+        let miss = EojFilter::from_hex("013001").unwrap();
+        assert!(inf_event(src, &f, None, Some(&class), None).is_some());
+        assert!(inf_event(src, &f, None, Some(&miss), None).is_none());
+        // epc フィルタ
+        assert!(inf_event(src, &f, None, None, Some(0x80)).is_some());
+        assert!(inf_event(src, &f, None, None, Some(0xB0)).is_none());
     }
 }

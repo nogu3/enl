@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use crate::error::{AppError, ErrKind};
 
 pub const ECHONET_PORT: u16 = 3610;
+/// ECHONET Lite のマルチキャストアドレス。INF 通知はここへ送られる。
+pub const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 23, 0);
 
 /// 3610 を専有する UDP ソケットを開く。バインド失敗は bind エラー (exit 5)。
 pub fn open_socket() -> Result<UdpSocket, AppError> {
@@ -27,10 +29,53 @@ pub fn open_socket() -> Result<UdpSocket, AppError> {
     })
 }
 
+/// INF 通知の待受用に 224.0.23.0 へ join する。
+/// iface 省略時は OS 既定のインタフェースで join する。
+pub fn join_multicast(socket: &UdpSocket, iface: Option<Ipv4Addr>) -> Result<(), AppError> {
+    let iface = iface.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    socket
+        .join_multicast_v4(&MULTICAST_ADDR, &iface)
+        .map_err(|e| {
+            AppError::new(
+                ErrKind::Network,
+                format!("{MULTICAST_ADDR} への join_multicast 失敗 (iface {iface}): {e}"),
+            )
+        })
+}
+
 /// 受信した 1 データグラム。
 pub struct Datagram {
     pub from: SocketAddr,
     pub data: Vec<u8>,
+}
+
+/// 1 データグラムを deadline まで待つ (listen 用)。deadline 到達は Ok(None)。
+/// deadline が None なら無期限にブロックする。
+pub fn recv_one(
+    socket: &UdpSocket,
+    deadline: Option<Instant>,
+) -> Result<Option<Datagram>, AppError> {
+    let timeout = match deadline {
+        Some(d) => match d.checked_duration_since(Instant::now()) {
+            Some(r) if !r.is_zero() => Some(r),
+            _ => return Ok(None),
+        },
+        None => None,
+    };
+    socket
+        .set_read_timeout(timeout)
+        .map_err(|e| AppError::new(ErrKind::Network, format!("set_read_timeout 失敗: {e}")))?;
+    let mut buf = [0u8; 1500];
+    match socket.recv_from(&mut buf) {
+        Ok((n, from)) => Ok(Some(Datagram {
+            from,
+            data: buf[..n].to_vec(),
+        })),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            Ok(None)
+        }
+        Err(e) => Err(AppError::new(ErrKind::Network, format!("受信失敗: {e}"))),
+    }
 }
 
 /// `window` の間 recv を集める (sweep discovery 用)。
