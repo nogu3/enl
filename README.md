@@ -51,6 +51,7 @@ enl discover                              # find nodes on the LAN
 enl get 192.0.2.10 013001 80             # read (home AC, 0x80 operation status)
 enl set 192.0.2.10 013001 80 30          # write (turn ON)
 enl describe 192.0.2.10 013001           # introspect the property map
+enl listen --eoj 0291 --epc 80           # wait for one lighting on/off INF notification
 enl schema get | jq .                    # print a subcommand's output JSON Schema (no network)
 RUST_LOG=debug enl discover              # send diagnostics to stderr
 ```
@@ -77,7 +78,17 @@ enl raw 192.0.2.10 013001 62 80          # raw Get 0x80
 enl raw 192.0.2.10 013001 61 80:30       # raw SetC 0x80=ON
 ```
 
-- `schema [discover|get|set|describe|raw]` — print the JSON Schema (draft 2020-12) of a subcommand's stdout output. Omit the target to get every subcommand keyed by name (`{"discover":{...},"get":{...},...}`). Stateless, no network. The output schema is a stable contract, so LLM function-calling / `jq` can fetch it programmatically.
+- `listen [--count 1] [--timeout-ms 60000] [--from <ip>] [--eoj <hex>] [--epc <hex>]` — wait for INF/INFC state-change notifications (binds 3610, joins `224.0.23.0`) and exit once `count` events are collected or the timeout elapses (`0` = wait indefinitely). `{"events":[{"ip","tid","seoj","deoj","esv","properties":[...]}]}`. `--eoj` matches the source EOJ: 4 hex digits = class (`0291` = any single-function lighting), 6 = exact instance. Zero events → exit 3 (timeout), one or more → exit 0. INFC is acknowledged with INFC_Res. Still one-shot: it never daemonizes — drive it from an external loop:
+
+```bash
+# when any lighting announces a state change, turn on another light
+while ev=$(enl listen --eoj 0291 --epc 80 --timeout-ms 0); do
+  echo "$ev" | jq -e '.events[0].properties[0].value.power == "on"' >/dev/null \
+    && enl set 192.0.2.11 029101 power on
+done
+```
+
+- `schema [discover|get|set|describe|raw|listen]` — print the JSON Schema (draft 2020-12) of a subcommand's stdout output. Omit the target to get every subcommand keyed by name (`{"discover":{...},"get":{...},...}`). Stateless, no network. The output schema is a stable contract, so LLM function-calling / `jq` can fetch it programmatically.
 
 ## Exit codes
 
@@ -106,8 +117,8 @@ task docker:test   # tests inside Docker (no toolchain needed)
 
 - `src/codec.rs` — frame data model + parse/build. Hand-written, zero-dependency. Round-trip tests guard against parse/build asymmetry bugs.
 - `src/properties.rs` — optional decode layer, incl. the property-map parser (two encodings for ≤15 vs ≥16 properties).
-- `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`). `discover` is a CIDR sweep (unicast Get to each host).
-- `src/commands.rs` — discover / get / set / describe / raw.
+- `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`). `discover` is a CIDR sweep (unicast Get to each host); `listen` joins the `224.0.23.0` multicast group.
+- `src/commands.rs` — discover / get / set / describe / raw / listen.
 - `src/schema.rs` — JSON Schema of each subcommand's stdout output (the `schema` subcommand).
 - `src/error.rs` — machine-readable errors + exit codes.
 - `src/main.rs` — clap CLI.
