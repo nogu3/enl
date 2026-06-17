@@ -4,6 +4,11 @@ version = "1.1.0"
 edition = "2021"
 description = "ECHONET Lite 専用 CLI。AIネイティブ・ステートレス・one-shot。"
 license = "MIT"
+authors = ["nogu3"]
+repository = "https://github.com/nogu3/enl"
+readme = "README.md"
+keywords = ["echonet", "echonet-lite", "smart-home", "cli", "iot"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "enl"
