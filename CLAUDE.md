@@ -128,7 +128,7 @@ EDATA(通常): SEOJ(3) DEOJ(3) ESV(1) OPC(1) [EPC(1) PDC(1) EDT(PDC)]×OPC
 - アドレス: `224.0.23.0:3610`
 - `listen` は受信のため該当インタフェースで `join_multicast_v4` する。送信系コマンドは join しない（応答は unicast で返るため不要。join しないので自分の送信フレームがループバックで戻る問題も起きない）。
 - `discover` は「CIDR sweep + multicast 1 発」の常時併用。**multicast にしか応答しない実機が存在する**（unicast で 3610 に届くフレームを無視し、multicast 宛にのみ応答する AIF 認証済み機器を確認）ため、sweep だけでは発見できない。タイムアウトは CLI フラグで調整可能。
-- `get` / `set` / `describe` / `raw` は `--multicast` で送信先だけ `224.0.23.0` に切り替えられる。`ip` 引数は「応答を期待する送信元」になる。自動フォールバック（unicast 失敗時の multicast 再試行）はしない — 所要時間が読めなくなり one-shot の透明性が下がるため明示フラグとする。
+- `get` / `set` / `describe` / `raw` は `--multicast` で送信先だけ `224.0.23.0` に切り替えられる。`ip` 引数は「応答を期待する送信元」になる。自動フォールバック（unicast 失敗時の multicast 再試行）はしない — 所要時間が読めなくなり one-shot の透明性が下がるため明示フラグとする。注意: multicast の Set は DEOJ が一致する **LAN 上の全機器** が実行する（応答レポートは `ip` の機器のみ）。
 - 応答の採用条件は「期待 IP 一致 + EHD(0x1081) + TID 一致」。multicast は他コントローラのトラフィックと混線しうるため必須で、unicast にも適用する。
 - multicast の egress インタフェースは制御しない（ルーティングテーブル任せ）。制御には `socket2`/`libc` の依存追加が必要なため、依存ゼロ方針を優先した既知の制約。multi-homed 環境で意図しないインタフェースに流れうる（実需が出たら `-i` 連動の egress 制御を追加する）。
 
