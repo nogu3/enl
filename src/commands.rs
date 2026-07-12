@@ -166,11 +166,12 @@ fn enumerate_hosts(net: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
 pub fn get(ip: IpAddr, eoj: Eoj, epcs: &[u8], timeout: Duration) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
     let props: Vec<Property> = epcs.iter().map(|&e| Property::get(e)).collect();
-    let frame = Frame::standard(next_tid(), CONTROLLER, eoj, Esv::Get, props);
+    let tid = next_tid();
+    let frame = Frame::standard(tid, CONTROLLER, eoj, Esv::Get, props);
     let dst = SocketAddr::new(ip, net::ECHONET_PORT);
     tracing::info!(%ip, eoj = eoj.to_hex(), "get 送信");
 
-    let dg = net::send_and_recv_one(&socket, dst, &codec::build(&frame), timeout)?;
+    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
     let resp = parse_response(&dg.data)?;
 
     let (esv, props) = standard_or_reject(&resp, eoj)?;
@@ -196,8 +197,9 @@ pub fn set(
     timeout: Duration,
 ) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
+    let tid = next_tid();
     let frame = Frame::standard(
-        next_tid(),
+        tid,
         CONTROLLER,
         eoj,
         Esv::SetC,
@@ -206,7 +208,7 @@ pub fn set(
     let dst = SocketAddr::new(ip, net::ECHONET_PORT);
     tracing::info!(%ip, eoj = eoj.to_hex(), epc = format!("{epc:02X}"), "set 送信");
 
-    let dg = net::send_and_recv_one(&socket, dst, &codec::build(&frame), timeout)?;
+    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
     let resp = parse_response(&dg.data)?;
     let (esv, props) = standard_or_reject(&resp, eoj)?;
 
@@ -227,8 +229,9 @@ pub fn set(
 /// プロパティマップ introspection。Get/Set/状変マップを引く。
 pub fn describe(ip: IpAddr, eoj: Eoj, timeout: Duration) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
+    let tid = next_tid();
     let frame = Frame::standard(
-        next_tid(),
+        tid,
         CONTROLLER,
         eoj,
         Esv::Get,
@@ -241,7 +244,7 @@ pub fn describe(ip: IpAddr, eoj: Eoj, timeout: Duration) -> Result<Value, AppErr
     let dst = SocketAddr::new(ip, net::ECHONET_PORT);
     tracing::info!(%ip, eoj = eoj.to_hex(), "describe 送信");
 
-    let dg = net::send_and_recv_one(&socket, dst, &codec::build(&frame), timeout)?;
+    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
     let resp = parse_response(&dg.data)?;
     let (esv, props) = standard_or_reject(&resp, eoj)?;
 
@@ -291,12 +294,13 @@ pub fn raw(
 ) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
     let seoj = seoj.unwrap_or(CONTROLLER);
-    let frame = Frame::standard(next_tid(), seoj, deoj, esv, props);
+    let tid = next_tid();
+    let frame = Frame::standard(tid, seoj, deoj, esv, props);
     let sent = codec::build(&frame);
     let dst = SocketAddr::new(ip, net::ECHONET_PORT);
     tracing::info!(%ip, deoj = deoj.to_hex(), esv = esv.name(), "raw 送信");
 
-    let dg = net::send_and_recv_one(&socket, dst, &sent, timeout)?;
+    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &sent, timeout)?;
 
     let mut out = json!({
         "ip": ip.to_string(),
