@@ -67,13 +67,15 @@ Every binary value always includes `edt_hex`; `value` is added when the decode d
 
 ## Subcommands & output schemas
 
+All subcommands accept the global `-i <IPv4>` / `--iface <IPv4>` flag — your local IPv4 address, used by `discover` to infer a `/24` CIDR when `--cidr` is omitted and by `listen` to pick the multicast join interface.
+
 - `discover [--cidr <CIDR>] [--timeout-ms 3000]` — `{"devices":[{"ip","count","instances":[...]}]}`. Sends a unicast CIDR sweep **plus** one multicast probe (some certified devices only answer multicast). With neither `--cidr` nor `-i`, the sweep is skipped and only multicast is used.
 - `get <ip> <eoj> <epc...> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","name?","pdc","edt_hex","value?"}]}`
 - `set <ip> <eoj> <epc> <edt> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted","properties":[...]}`
 - `describe <ip> <eoj> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[{"epc","name?","values?"}],"set_map":[...],"inf_map":[...]}`. `values` lists the value range of enum-typed EPCs (`{"41":"open","42":"close",...}`); numeric / unsupported EPCs omit it.
 - `raw <ip> <deoj> <esv> [epc[:edt]...] [--seoj 05FF01] [--multicast] [--timeout-ms 2000]` — send an arbitrary ESV/EPC/EDT frame. `{"ip","sent_hex","response_hex","frame?":{...}}`. SNA is returned as `response_hex` rather than an error (a debugging / unsupported-op escape hatch); a `parse_error` is included if the response can't be parsed. EPC/EDT are hex-only here.
 
-`--multicast` sends the frame to `224.0.23.0` instead of `<ip>` — for devices that only respond to multicast-addressed frames — while the response is still expected from `<ip>`. There is no automatic fallback; the flag is always explicit. The multicast egress interface is left to the routing table (a known limitation on multi-homed hosts).
+`--multicast` sends the frame to `224.0.23.0` instead of `<ip>` — for devices that only respond to multicast-addressed frames — while the response is still expected from `<ip>`. There is no automatic fallback; the flag is always explicit. The multicast egress interface is left to the routing table (a known limitation on multi-homed hosts). Beware with `set`: a multicast Set is processed by **every** device whose EOJ matches the target DEOJ, not just `<ip>` — only the reply from `<ip>` is reported.
 
 ```bash
 enl raw 192.0.2.10 013001 62 80          # raw Get 0x80
