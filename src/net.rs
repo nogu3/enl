@@ -16,6 +16,15 @@ pub const ECHONET_PORT: u16 = 3610;
 /// ECHONET Lite のマルチキャストアドレス。INF 通知はここへ送られる。
 pub const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 23, 0);
 
+/// 受信フレームが今回の要求への応答候補かを判定する。
+/// EHD (0x1081) と TID の一致を要求する。multicast は他コントローラの
+/// トラフィックと混線しうるため必須。unicast にも適用する
+/// (ECHONET Lite 仕様上、応答 TID は要求 TID と一致する)。
+#[allow(dead_code)]
+pub fn is_reply_candidate(data: &[u8], tid: u16) -> bool {
+    data.len() >= 4 && data[0..2] == [0x10, 0x81] && data[2..4] == tid.to_be_bytes()
+}
+
 /// 3610 を専有する UDP ソケットを開く。バインド失敗は bind エラー (exit 5)。
 pub fn open_socket() -> Result<UdpSocket, AppError> {
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, ECHONET_PORT);
@@ -156,4 +165,35 @@ pub fn send_and_recv_one(
         ErrKind::Timeout,
         format!("{} からの応答なし ({}ms)", dst.ip(), timeout.as_millis()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_candidate_accepts_matching_ehd_and_tid() {
+        // EHD=0x1081, TID=0x00AB + 適当な EDATA
+        let data = [0x10, 0x81, 0x00, 0xAB, 0x0E, 0xF0, 0x01];
+        assert!(is_reply_candidate(&data, 0x00AB));
+    }
+
+    #[test]
+    fn reply_candidate_rejects_tid_mismatch() {
+        let data = [0x10, 0x81, 0x00, 0xAB];
+        assert!(!is_reply_candidate(&data, 0x00AC));
+    }
+
+    #[test]
+    fn reply_candidate_rejects_ehd_mismatch() {
+        // EHD2=0x82 (任意フォーマット) や別プロトコルは対象外
+        assert!(!is_reply_candidate(&[0x10, 0x82, 0x00, 0xAB], 0x00AB));
+        assert!(!is_reply_candidate(&[0x11, 0x81, 0x00, 0xAB], 0x00AB));
+    }
+
+    #[test]
+    fn reply_candidate_rejects_short_data() {
+        assert!(!is_reply_candidate(&[0x10, 0x81, 0x00], 0x00AB));
+        assert!(!is_reply_candidate(&[], 0x00AB));
+    }
 }
