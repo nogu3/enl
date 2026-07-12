@@ -29,6 +29,25 @@ fn next_tid() -> u16 {
         .unwrap_or(1)
 }
 
+/// 送信先を決める。multicast 時は 224.0.23.0:3610 へ送る
+/// (multicast にしか応答しない機器向け。応答自体は ip から unicast で返る)。
+fn dst_for(ip: IpAddr, multicast: bool) -> SocketAddr {
+    if multicast {
+        SocketAddr::new(IpAddr::V4(net::MULTICAST_ADDR), net::ECHONET_PORT)
+    } else {
+        SocketAddr::new(ip, net::ECHONET_PORT)
+    }
+}
+
+/// stderr ログ用の transport 名。
+fn transport_name(multicast: bool) -> &'static str {
+    if multicast {
+        "multicast"
+    } else {
+        "unicast"
+    }
+}
+
 /// CIDR sweep ベースの discovery。
 ///
 /// 指定 CIDR (or iface IP の /24) 内の全ホストへ unicast `Get 0EF001 D6` を送り、
@@ -163,13 +182,19 @@ fn enumerate_hosts(net: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
 }
 
 /// IP / EOJ / EPC を指定して Get。
-pub fn get(ip: IpAddr, eoj: Eoj, epcs: &[u8], timeout: Duration) -> Result<Value, AppError> {
+pub fn get(
+    ip: IpAddr,
+    eoj: Eoj,
+    epcs: &[u8],
+    timeout: Duration,
+    multicast: bool,
+) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
     let props: Vec<Property> = epcs.iter().map(|&e| Property::get(e)).collect();
     let tid = next_tid();
     let frame = Frame::standard(tid, CONTROLLER, eoj, Esv::Get, props);
-    let dst = SocketAddr::new(ip, net::ECHONET_PORT);
-    tracing::info!(%ip, eoj = eoj.to_hex(), "get 送信");
+    let dst = dst_for(ip, multicast);
+    tracing::info!(%ip, eoj = eoj.to_hex(), transport = transport_name(multicast), "get 送信");
 
     let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
     let resp = parse_response(&dg.data)?;
@@ -195,6 +220,7 @@ pub fn set(
     epc: u8,
     edt: Vec<u8>,
     timeout: Duration,
+    multicast: bool,
 ) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
     let tid = next_tid();
@@ -205,8 +231,8 @@ pub fn set(
         Esv::SetC,
         vec![Property::new(epc, edt)],
     );
-    let dst = SocketAddr::new(ip, net::ECHONET_PORT);
-    tracing::info!(%ip, eoj = eoj.to_hex(), epc = format!("{epc:02X}"), "set 送信");
+    let dst = dst_for(ip, multicast);
+    tracing::info!(%ip, eoj = eoj.to_hex(), epc = format!("{epc:02X}"), transport = transport_name(multicast), "set 送信");
 
     let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
     let resp = parse_response(&dg.data)?;
@@ -227,7 +253,12 @@ pub fn set(
 }
 
 /// プロパティマップ introspection。Get/Set/状変マップを引く。
-pub fn describe(ip: IpAddr, eoj: Eoj, timeout: Duration) -> Result<Value, AppError> {
+pub fn describe(
+    ip: IpAddr,
+    eoj: Eoj,
+    timeout: Duration,
+    multicast: bool,
+) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
     let tid = next_tid();
     let frame = Frame::standard(
@@ -241,8 +272,8 @@ pub fn describe(ip: IpAddr, eoj: Eoj, timeout: Duration) -> Result<Value, AppErr
             Property::get(EPC_INF_MAP),
         ],
     );
-    let dst = SocketAddr::new(ip, net::ECHONET_PORT);
-    tracing::info!(%ip, eoj = eoj.to_hex(), "describe 送信");
+    let dst = dst_for(ip, multicast);
+    tracing::info!(%ip, eoj = eoj.to_hex(), transport = transport_name(multicast), "describe 送信");
 
     let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
     let resp = parse_response(&dg.data)?;
@@ -291,14 +322,15 @@ pub fn raw(
     seoj: Option<Eoj>,
     props: Vec<Property>,
     timeout: Duration,
+    multicast: bool,
 ) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
     let seoj = seoj.unwrap_or(CONTROLLER);
     let tid = next_tid();
     let frame = Frame::standard(tid, seoj, deoj, esv, props);
     let sent = codec::build(&frame);
-    let dst = SocketAddr::new(ip, net::ECHONET_PORT);
-    tracing::info!(%ip, deoj = deoj.to_hex(), esv = esv.name(), "raw 送信");
+    let dst = dst_for(ip, multicast);
+    tracing::info!(%ip, deoj = deoj.to_hex(), esv = esv.name(), transport = transport_name(multicast), "raw 送信");
 
     let dg = net::send_and_recv_one(&socket, dst, ip, tid, &sent, timeout)?;
 
@@ -571,6 +603,13 @@ fn standard_or_reject(frame: &Frame, eoj: Eoj) -> Result<(Esv, Vec<Property>), A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dst_for_unicast_and_multicast() {
+        let ip: IpAddr = "192.0.2.22".parse().unwrap();
+        assert_eq!(dst_for(ip, false).to_string(), "192.0.2.22:3610");
+        assert_eq!(dst_for(ip, true).to_string(), "224.0.23.0:3610");
+    }
 
     #[test]
     fn parse_cidr_basic() {

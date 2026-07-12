@@ -56,6 +56,10 @@ enum Command {
         /// 取得する EPC (2 hex 桁, 複数可, 例 80 B0)。
         #[arg(required = true, num_args = 1..)]
         epc: Vec<String>,
+        /// 送信先を 224.0.23.0 (multicast) に切り替える。multicast にしか
+        /// 応答しない機器向け。応答は ip から受ける。
+        #[arg(long)]
+        multicast: bool,
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
@@ -68,6 +72,10 @@ enum Command {
         epc: String,
         /// 設定値 EDT (hex, 例 30)。
         edt: String,
+        /// 送信先を 224.0.23.0 (multicast) に切り替える。multicast にしか
+        /// 応答しない機器向け。応答は ip から受ける。
+        #[arg(long)]
+        multicast: bool,
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
@@ -75,6 +83,10 @@ enum Command {
     Describe {
         ip: IpAddr,
         eoj: String,
+        /// 送信先を 224.0.23.0 (multicast) に切り替える。multicast にしか
+        /// 応答しない機器向け。応答は ip から受ける。
+        #[arg(long)]
+        multicast: bool,
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
@@ -94,6 +106,10 @@ enum Command {
         /// 送信元 EOJ (SEOJ, 6 hex 桁)。省略時はコントローラ 05FF01。
         #[arg(long)]
         seoj: Option<String>,
+        /// 送信先を 224.0.23.0 (multicast) に切り替える。multicast にしか
+        /// 応答しない機器向け。応答は ip から受ける。
+        #[arg(long)]
+        multicast: bool,
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
@@ -184,31 +200,41 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             ip,
             eoj,
             epc,
+            multicast,
             timeout_ms,
         } => {
             let eoj = parse_eoj(&eoj)?;
             let epcs = resolve_epcs(eoj, &epc)?;
-            commands::get(ip, eoj, &epcs, Duration::from_millis(timeout_ms))
+            commands::get(ip, eoj, &epcs, Duration::from_millis(timeout_ms), multicast)
         }
         Command::Set {
             ip,
             eoj,
             epc,
             edt,
+            multicast,
             timeout_ms,
         } => {
             let eoj = parse_eoj(&eoj)?;
             let epc = resolve_epc(eoj, &epc)?;
             let edt = resolve_edt(eoj, epc, &edt)?;
-            commands::set(ip, eoj, epc, edt, Duration::from_millis(timeout_ms))
+            commands::set(
+                ip,
+                eoj,
+                epc,
+                edt,
+                Duration::from_millis(timeout_ms),
+                multicast,
+            )
         }
         Command::Describe {
             ip,
             eoj,
+            multicast,
             timeout_ms,
         } => {
             let eoj = parse_eoj(&eoj)?;
-            commands::describe(ip, eoj, Duration::from_millis(timeout_ms))
+            commands::describe(ip, eoj, Duration::from_millis(timeout_ms), multicast)
         }
         Command::Raw {
             ip,
@@ -216,6 +242,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             esv,
             props,
             seoj,
+            multicast,
             timeout_ms,
         } => {
             let deoj = parse_eoj(&eoj)?;
@@ -232,6 +259,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
                 seoj,
                 props,
                 Duration::from_millis(timeout_ms),
+                multicast,
             )
         }
         Command::Listen {
