@@ -34,7 +34,7 @@ task build            # release build → target/release/enl
 
 ### Docker (no local toolchain)
 
-Port 3610 must be owned by the process, so **host networking is required** (a bridge network can't receive device responses; `discover` also uses a per-host unicast CIDR sweep).
+Port 3610 must be owned by the process, so **host networking is required** (a bridge network can't receive device responses; `discover` uses a per-host unicast CIDR sweep plus a multicast probe).
 
 ```bash
 task docker:build     # build the runtime image
@@ -67,11 +67,13 @@ Every binary value always includes `edt_hex`; `value` is added when the decode d
 
 ## Subcommands & output schemas
 
-- `discover [--timeout-ms 3000]` — `{"devices":[{"ip","count","instances":[...]}]}`
-- `get <ip> <eoj> <epc...> [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","name?","pdc","edt_hex","value?"}]}`
-- `set <ip> <eoj> <epc> <edt> [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted","properties":[...]}`
-- `describe <ip> <eoj> [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[{"epc","name?","values?"}],"set_map":[...],"inf_map":[...]}`. `values` lists the value range of enum-typed EPCs (`{"41":"open","42":"close",...}`); numeric / unsupported EPCs omit it.
-- `raw <ip> <deoj> <esv> [epc[:edt]...] [--seoj 05FF01] [--timeout-ms 2000]` — send an arbitrary ESV/EPC/EDT frame. `{"ip","sent_hex","response_hex","frame?":{...}}`. SNA is returned as `response_hex` rather than an error (a debugging / unsupported-op escape hatch); a `parse_error` is included if the response can't be parsed. EPC/EDT are hex-only here.
+- `discover [--cidr <CIDR>] [--timeout-ms 3000]` — `{"devices":[{"ip","count","instances":[...]}]}`. Sends a unicast CIDR sweep **plus** one multicast probe (some certified devices only answer multicast). With neither `--cidr` nor `-i`, the sweep is skipped and only multicast is used.
+- `get <ip> <eoj> <epc...> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","name?","pdc","edt_hex","value?"}]}`
+- `set <ip> <eoj> <epc> <edt> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted","properties":[...]}`
+- `describe <ip> <eoj> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[{"epc","name?","values?"}],"set_map":[...],"inf_map":[...]}`. `values` lists the value range of enum-typed EPCs (`{"41":"open","42":"close",...}`); numeric / unsupported EPCs omit it.
+- `raw <ip> <deoj> <esv> [epc[:edt]...] [--seoj 05FF01] [--multicast] [--timeout-ms 2000]` — send an arbitrary ESV/EPC/EDT frame. `{"ip","sent_hex","response_hex","frame?":{...}}`. SNA is returned as `response_hex` rather than an error (a debugging / unsupported-op escape hatch); a `parse_error` is included if the response can't be parsed. EPC/EDT are hex-only here.
+
+`--multicast` sends the frame to `224.0.23.0` instead of `<ip>` — for devices that only respond to multicast-addressed frames — while the response is still expected from `<ip>`. There is no automatic fallback; the flag is always explicit. The multicast egress interface is left to the routing table (a known limitation on multi-homed hosts).
 
 ```bash
 enl raw 192.0.2.10 013001 62 80          # raw Get 0x80
@@ -117,7 +119,7 @@ task docker:test   # tests inside Docker (no toolchain needed)
 
 - `src/codec.rs` — frame data model + parse/build. Hand-written, zero-dependency. Round-trip tests guard against parse/build asymmetry bugs.
 - `src/properties.rs` — optional decode layer, incl. the property-map parser (two encodings for ≤15 vs ≥16 properties).
-- `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`). `discover` is a CIDR sweep (unicast Get to each host); `listen` joins the `224.0.23.0` multicast group.
+- `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`). `discover` is a CIDR sweep plus a multicast probe (some devices only answer multicast); `listen` joins the `224.0.23.0` multicast group.
 - `src/commands.rs` — discover / get / set / describe / raw / listen.
 - `src/schema.rs` — JSON Schema of each subcommand's stdout output (the `schema` subcommand).
 - `src/error.rs` — machine-readable errors + exit codes.

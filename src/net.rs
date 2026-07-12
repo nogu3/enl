@@ -3,8 +3,11 @@
 //! 最重要: 仕様準拠機器は応答を送信元ポートでなく 3610 に返す。
 //! よって送受信ソケットを 0.0.0.0:3610 にバインドして専有する。
 //!
-//! discover は CIDR sweep (各ホストへ unicast Get) 方式。multicast は
-//! WiFi/AP 環境 (IGMP snooping, multicast 抑制) で信頼性が低いため採用しない。
+//! discover は CIDR sweep (各ホストへ unicast Get) と multicast (224.0.23.0) の
+//! 常時併用。multicast にしか応答しない実機 (AIF 認証済み機器で確認) が存在する
+//! ため sweep だけでは不十分。multicast の egress インタフェースは制御しない
+//! (ルーティングテーブル任せ)。制御には socket2 等の依存追加が要るため、
+//! 依存ゼロ方針を優先した既知の制約 (実需が出たら -i 連動で追加する)。
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
