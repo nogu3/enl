@@ -38,9 +38,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// CIDR sweep でノードを探索 (各ホストへ unicast Get 0EF001 D6)。
+    /// ノードを探索 (CIDR sweep + multicast 併用)。
+    ///
+    /// CIDR 内全ホストへの unicast Get と 224.0.23.0 への multicast Get を
+    /// 同時に投げて応答を集約する。--cidr / -i とも省略時は multicast のみ。
     Discover {
-        /// 探索する CIDR (例: 192.0.2.0/24)。省略時は -i のローカル IP から /24 を推定。
+        /// sweep する CIDR (例: 192.0.2.0/24)。省略時は -i のローカル IP から /24 を
+        /// 推定し、それも無ければ sweep せず multicast のみで探索する。
         #[arg(long)]
         cidr: Option<String>,
         /// 応答収集ウィンドウ (ミリ秒)。

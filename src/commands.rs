@@ -48,27 +48,22 @@ fn transport_name(multicast: bool) -> &'static str {
     }
 }
 
-/// CIDR sweep ベースの discovery。
+/// sweep + multicast 併用の discovery。
 ///
 /// 指定 CIDR (or iface IP の /24) 内の全ホストへ unicast `Get 0EF001 D6` を送り、
-/// `window` の間に返ってきたノードを集約する。
-/// multicast (224.0.23.0) は WiFi/AP 環境で取りこぼしが多いため使わない。
+/// さらに同一フレームを multicast (224.0.23.0) へ 1 発送信して、`window` の間に
+/// 返ってきたノードを集約する。multicast にしか応答しない実機が存在するため
+/// 常時併用する。--cidr / -i とも省略時は sweep をスキップし multicast のみ。
 pub fn discover(
     cidr: Option<&str>,
     iface: Option<Ipv4Addr>,
     window: Duration,
 ) -> Result<Value, AppError> {
-    let (base, prefix) = resolve_cidr(cidr, iface)?;
-    let hosts = enumerate_hosts(base, prefix);
-    if hosts.is_empty() {
-        return Err(AppError::new(
-            ErrKind::Internal,
-            format!("CIDR {}/{} に有効ホストなし", base, prefix),
-        ));
-    }
+    let hosts = sweep_hosts(cidr, iface)?;
     let socket = net::open_socket()?;
+    let tid = next_tid();
     let frame = Frame::standard(
-        next_tid(),
+        tid,
         CONTROLLER,
         NODE_PROFILE,
         Esv::Get,
@@ -76,19 +71,39 @@ pub fn discover(
     );
     let payload = codec::build(&frame);
 
-    tracing::info!(
-        base = %base,
-        prefix,
-        hosts = hosts.len(),
-        window_ms = window.as_millis(),
-        "sweep discovery 送信"
-    );
-
-    for h in &hosts {
-        let dst = SocketAddr::new(IpAddr::V4(*h), net::ECHONET_PORT);
-        if let Err(e) = socket.send_to(&payload, dst) {
-            tracing::debug!(ip = %h, error = %e, "send_to 失敗 (continue)");
+    match &hosts {
+        Some(hosts) => {
+            tracing::info!(
+                hosts = hosts.len(),
+                window_ms = window.as_millis(),
+                "sweep + multicast discovery 送信"
+            );
+            for h in hosts {
+                let dst = SocketAddr::new(IpAddr::V4(*h), net::ECHONET_PORT);
+                if let Err(e) = socket.send_to(&payload, dst) {
+                    tracing::debug!(ip = %h, error = %e, "send_to 失敗 (continue)");
+                }
+            }
         }
+        None => {
+            tracing::warn!(
+                window_ms = window.as_millis(),
+                "CIDR 解決不能 (--cidr / -i なし)。sweep をスキップし multicast のみで探索"
+            );
+        }
+    }
+
+    // multicast にしか応答しない機器向けに同一フレーム (同一 TID) を 1 発。
+    let mdst = SocketAddr::new(IpAddr::V4(net::MULTICAST_ADDR), net::ECHONET_PORT);
+    if let Err(e) = socket.send_to(&payload, mdst) {
+        // sweep も無い場合は何も送れていないので network エラーにする。
+        if hosts.is_none() {
+            return Err(AppError::new(
+                ErrKind::Network,
+                format!("multicast 送信失敗: {e}"),
+            ));
+        }
+        tracing::warn!(error = %e, "multicast 送信失敗 (sweep のみで継続)");
     }
 
     let datagrams = net::collect_until(&socket, window)?;
@@ -99,6 +114,10 @@ pub fn discover(
     let mut by_ip: HashMap<IpAddr, Value> = HashMap::new();
     for dg in datagrams {
         if by_ip.contains_key(&dg.from.ip()) {
+            continue;
+        }
+        if !net::is_reply_candidate(&dg.data, tid) {
+            tracing::debug!(from = %dg.from, "EHD/TID 不一致フレームをスキップ");
             continue;
         }
         let frame = match codec::parse(&dg.data) {
@@ -134,6 +153,19 @@ pub fn discover(
     devices.sort_by(|a, b| a["ip"].as_str().cmp(&b["ip"].as_str()));
     tracing::info!(devices = devices.len(), "discovery 完了");
     Ok(json!({ "devices": devices }))
+}
+
+/// sweep 対象ホストを解決する。--cidr / -i とも無ければ sweep をスキップして
+/// multicast のみで探索する (Ok(None))。明示 --cidr の書式不正は従来どおりエラー。
+fn sweep_hosts(
+    cidr: Option<&str>,
+    iface: Option<Ipv4Addr>,
+) -> Result<Option<Vec<Ipv4Addr>>, AppError> {
+    match resolve_cidr(cidr, iface) {
+        Ok((base, prefix)) => Ok(Some(enumerate_hosts(base, prefix))),
+        Err(e) if cidr.is_some() => Err(e),
+        Err(_) => Ok(None),
+    }
 }
 
 /// `--cidr` 優先、無ければ iface IP から /24 を推定。両方無ければエラー。
@@ -672,6 +704,27 @@ mod tests {
     #[test]
     fn resolve_cidr_neither_errors() {
         assert!(resolve_cidr(None, None).is_err());
+    }
+
+    #[test]
+    fn sweep_hosts_none_when_unresolvable() {
+        // --cidr / -i とも無し → sweep スキップ (multicast のみ) を表す None
+        assert!(sweep_hosts(None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn sweep_hosts_invalid_explicit_cidr_errors() {
+        // 明示 --cidr の書式不正は握りつぶさずエラー
+        assert!(sweep_hosts(Some("nope/24"), None).is_err());
+    }
+
+    #[test]
+    fn sweep_hosts_resolves_from_iface() {
+        let hosts = sweep_hosts(None, Some(Ipv4Addr::new(192, 0, 2, 130)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(hosts.len(), 254);
+        assert_eq!(hosts.first(), Some(&Ipv4Addr::new(192, 0, 2, 1)));
     }
 
     #[test]
