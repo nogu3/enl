@@ -109,7 +109,7 @@ EDATA(通常): SEOJ(3) DEOJ(3) ESV(1) OPC(1) [EPC(1) PDC(1) EDT(PDC)]×OPC
 
 ### stderr エラー
 - 機械可読エラーは stderr に JSON で出す: `{"error": {"kind": "...", "detail": "...", ...}}`。
-- `kind` の例: `timeout` / `device_rejected` / `network` / `parse` / `bind`。
+- `kind` の例: `timeout` / `device_rejected` / `network` / `parse` / `bind` / `usage`。
 
 ### exit code（cron / n8n が分岐できるように分ける）
 | code | 意味 |

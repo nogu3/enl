@@ -106,7 +106,7 @@ Designed so `cron` / `n8n` can branch on the result.
 | 3 | timeout (no response) |
 | 4 | device rejected (SNA) |
 | 5 | network / bind failure |
-| 1 | other unexpected error |
+| 1 | invalid input detected by enl (`usage`), parse error, or other unexpected error |
 
 ## Development
 

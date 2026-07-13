@@ -199,14 +199,14 @@ fn sweep_hosts(
 fn resolve_cidr(cidr: Option<&str>, iface: Option<Ipv4Addr>) -> Result<(Ipv4Addr, u8), AppError> {
     if let Some(s) = cidr {
         return parse_cidr(s)
-            .map_err(|e| AppError::new(ErrKind::Internal, format!("CIDR 不正 '{s}': {e}")));
+            .map_err(|e| AppError::new(ErrKind::Usage, format!("CIDR 不正 '{s}': {e}")));
     }
     if let Some(ip) = iface {
         let oct = ip.octets();
         return Ok((Ipv4Addr::new(oct[0], oct[1], oct[2], 0), 24));
     }
     Err(AppError::new(
-        ErrKind::Internal,
+        ErrKind::Usage,
         "--cidr <CIDR> もしくは -i <IPv4> のいずれかが必要 (例: --cidr 192.0.2.0/24)",
     ))
 }
@@ -372,6 +372,7 @@ pub fn raw(
 }
 
 /// listen の SEOJ フィルタ。4 hex 桁ならクラス一致、6 hex 桁なら完全一致。
+#[derive(Debug)]
 pub enum EojFilter {
     Class(u8, u8),
     Exact(Eoj),
@@ -381,12 +382,12 @@ impl EojFilter {
     /// "0291" (クラス) もしくは "029101" (完全一致) から生成。
     pub fn from_hex(s: &str) -> Result<EojFilter, AppError> {
         let bytes = codec::hex_to_bytes(s)
-            .map_err(|e| AppError::new(ErrKind::Internal, format!("EOJ フィルタ hex 不正: {e}")))?;
+            .map_err(|e| AppError::new(ErrKind::Usage, format!("EOJ フィルタ hex 不正: {e}")))?;
         match bytes.len() {
             2 => Ok(EojFilter::Class(bytes[0], bytes[1])),
             3 => Ok(EojFilter::Exact(Eoj([bytes[0], bytes[1], bytes[2]]))),
             _ => Err(AppError::new(
-                ErrKind::Internal,
+                ErrKind::Usage,
                 "EOJ フィルタは 4 hex 桁 (クラス) か 6 hex 桁 (完全一致)",
             )),
         }
@@ -770,5 +771,16 @@ mod tests {
         // epc フィルタ
         assert!(inf_event(src, &f, None, None, Some(0x80)).is_some());
         assert!(inf_event(src, &f, None, None, Some(0xB0)).is_none());
+    }
+
+    #[test]
+    fn user_input_errors_are_usage_kind() {
+        use crate::error::ErrKind;
+        assert_eq!(resolve_cidr(None, None).unwrap_err().kind, ErrKind::Usage);
+        assert_eq!(
+            sweep_hosts(Some("nope/24"), None).unwrap_err().kind,
+            ErrKind::Usage
+        );
+        assert_eq!(EojFilter::from_hex("02").unwrap_err().kind, ErrKind::Usage);
     }
 }
