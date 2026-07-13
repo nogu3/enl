@@ -15,7 +15,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use codec::{Eoj, Esv, Property};
 use error::{AppError, ErrKind};
@@ -145,32 +145,8 @@ enum Command {
     Schema {
         /// 対象サブコマンド。省略時は全サブコマンドのスキーマを 1 オブジェクトで出す。
         #[arg(value_enum)]
-        target: Option<SchemaTarget>,
+        target: Option<schema::SchemaTarget>,
     },
-}
-
-/// `enl schema` の対象サブコマンド。clap が未知値を弾く (exit 2)。
-#[derive(Clone, Copy, ValueEnum)]
-enum SchemaTarget {
-    Discover,
-    Get,
-    Set,
-    Describe,
-    Raw,
-    Listen,
-}
-
-impl SchemaTarget {
-    fn as_str(self) -> &'static str {
-        match self {
-            SchemaTarget::Discover => "discover",
-            SchemaTarget::Get => "get",
-            SchemaTarget::Set => "set",
-            SchemaTarget::Describe => "describe",
-            SchemaTarget::Raw => "raw",
-            SchemaTarget::Listen => "listen",
-        }
-    }
 }
 
 fn main() -> ExitCode {
@@ -285,7 +261,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             let timeout = (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms));
             commands::listen(iface, count, timeout, from, eoj_filter, epc)
         }
-        Command::Schema { target } => Ok(schema::for_target(target.map(SchemaTarget::as_str))),
+        Command::Schema { target } => Ok(schema::for_target(target)),
     }
 }
 
