@@ -62,7 +62,7 @@ fn request(
     let tid = next_tid();
     let frame = Frame::standard(tid, CONTROLLER, eoj, esv, props);
     let dst = dst_for(ip, multicast);
-    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
+    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &build_frame(&frame)?, timeout)?;
     let resp = parse_response(&dg.data)?;
     standard_or_reject(&resp, eoj)
 }
@@ -96,7 +96,7 @@ pub fn discover(
         Esv::Get,
         vec![Property::get(EPC_INSTANCE_LIST)],
     );
-    let payload = codec::build(&frame);
+    let payload = build_frame(&frame)?;
 
     match &hosts {
         Some(hosts) => {
@@ -349,7 +349,7 @@ pub fn raw(
     let seoj = seoj.unwrap_or(CONTROLLER);
     let tid = next_tid();
     let frame = Frame::standard(tid, seoj, deoj, esv, props);
-    let sent = codec::build(&frame);
+    let sent = build_frame(&frame)?;
     let dst = dst_for(ip, multicast);
     tracing::info!(%ip, deoj = deoj.to_hex(), esv = esv.name(), transport = transport_name(multicast), "raw 送信");
 
@@ -522,8 +522,15 @@ fn reply_infc_res(socket: &std::net::UdpSocket, src: IpAddr, frame: &Frame) {
         Esv::InfCRes,
         props.iter().map(|p| Property::get(p.epc)).collect(),
     );
+    let payload = match codec::build(&res) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(%src, error = %e, "INFC_Res 構築失敗 (continue)");
+            return;
+        }
+    };
     let dst = SocketAddr::new(src, net::ECHONET_PORT);
-    if let Err(e) = socket.send_to(&codec::build(&res), dst) {
+    if let Err(e) = socket.send_to(&payload, dst) {
         tracing::warn!(%src, error = %e, "INFC_Res 送信失敗 (continue)");
     }
 }
@@ -575,6 +582,12 @@ fn parse_response(data: &[u8]) -> Result<Frame, AppError> {
         AppError::new(ErrKind::Parse, format!("応答パース失敗: {e}"))
             .with_extra(json!({ "raw_hex": codec::bytes_to_hex(data) }))
     })
+}
+
+/// Frame を build する。TooLong (EDT/プロパティ数の上限超過) は CLI の
+/// hex 入力からのみ到達しうるため usage エラーにする。
+fn build_frame(frame: &Frame) -> Result<Vec<u8>, AppError> {
+    codec::build(frame).map_err(|e| AppError::new(ErrKind::Usage, format!("フレーム構築失敗: {e}")))
 }
 
 /// Standard フレームならプロパティを返す。SNA なら device_rejected (exit 4)。
@@ -782,5 +795,18 @@ mod tests {
             ErrKind::Usage
         );
         assert_eq!(EojFilter::from_hex("02").unwrap_err().kind, ErrKind::Usage);
+    }
+
+    #[test]
+    fn build_frame_oversize_edt_is_usage() {
+        use crate::error::ErrKind;
+        let frame = Frame::standard(
+            0x0001,
+            CONTROLLER,
+            NODE_PROFILE,
+            Esv::SetC,
+            vec![Property::new(0x80, vec![0u8; 256])],
+        );
+        assert_eq!(build_frame(&frame).unwrap_err().kind, ErrKind::Usage);
     }
 }

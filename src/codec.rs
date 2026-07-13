@@ -244,6 +244,8 @@ pub enum CodecError {
     BadField(&'static str),
     /// hex 文字列パース失敗。
     BadHex,
+    /// PDC (EDT 長) や OPC (プロパティ数) が 1 バイト表現の上限 255 を超過。
+    TooLong(&'static str),
 }
 
 impl fmt::Display for CodecError {
@@ -253,6 +255,7 @@ impl fmt::Display for CodecError {
             CodecError::BadEhd1(v) => write!(f, "EHD1 が不正: 0x{v:02X} (期待 0x10)"),
             CodecError::BadField(w) => write!(f, "入力フィールド不正: {w}"),
             CodecError::BadHex => write!(f, "hex 文字列が不正"),
+            CodecError::TooLong(w) => write!(f, "サイズ上限超過: {w}"),
         }
     }
 }
@@ -333,7 +336,9 @@ fn parse_block(c: &mut Cursor, label: &'static str) -> Result<Vec<Property>, Cod
 // ───────────────────────── build ─────────────────────────
 
 /// Frame をバイト列にシリアライズする。
-pub fn build(frame: &Frame) -> Vec<u8> {
+/// PDC / OPC は 1 バイトのため、EDT 255 バイト超・プロパティ 255 個超は
+/// wrap で壊れたフレームを黙って作らず TooLong で拒否する。
+pub fn build(frame: &Frame) -> Result<Vec<u8>, CodecError> {
     let mut out = Vec::with_capacity(16);
     out.push(frame.ehd1);
     out.push(frame.ehd2);
@@ -349,7 +354,7 @@ pub fn build(frame: &Frame) -> Vec<u8> {
             out.extend_from_slice(&seoj.0);
             out.extend_from_slice(&deoj.0);
             out.push(esv.to_u8());
-            build_block(&mut out, props);
+            build_block(&mut out, props)?;
         }
         Edata::SetGet {
             seoj,
@@ -361,20 +366,27 @@ pub fn build(frame: &Frame) -> Vec<u8> {
             out.extend_from_slice(&seoj.0);
             out.extend_from_slice(&deoj.0);
             out.push(esv.to_u8());
-            build_block(&mut out, set_props);
-            build_block(&mut out, get_props);
+            build_block(&mut out, set_props)?;
+            build_block(&mut out, get_props)?;
         }
     }
-    out
+    Ok(out)
 }
 
-fn build_block(out: &mut Vec<u8>, props: &[Property]) {
+fn build_block(out: &mut Vec<u8>, props: &[Property]) -> Result<(), CodecError> {
+    if props.len() > u8::MAX as usize {
+        return Err(CodecError::TooLong("OPC (プロパティ数) は 255 以下"));
+    }
     out.push(props.len() as u8);
     for p in props {
+        if p.edt.len() > u8::MAX as usize {
+            return Err(CodecError::TooLong("EDT は 255 バイト以下 (PDC 上限)"));
+        }
         out.push(p.epc);
         out.push(p.pdc());
         out.extend_from_slice(&p.edt);
     }
+    Ok(())
 }
 
 // ───────────────────────── 小物 ─────────────────────────
@@ -459,7 +471,7 @@ mod tests {
     /// codec の砦: parse → build → parse が一致 (ラウンドトリップ)。
     fn roundtrip(buf: &[u8]) {
         let f1 = parse(buf).expect("parse 1");
-        let rebuilt = build(&f1);
+        let rebuilt = build(&f1).expect("build");
         assert_eq!(rebuilt, buf, "build がバイト一致しない");
         let f2 = parse(&rebuilt).expect("parse 2");
         assert_eq!(f1, f2, "parse→build→parse が不一致");
@@ -474,7 +486,8 @@ mod tests {
             Eoj([0x0E, 0xF0, 0x01]),
             Esv::Get,
             vec![Property::get(0xD6)],
-        ));
+        ))
+        .unwrap();
         roundtrip(&buf);
     }
 
@@ -489,7 +502,8 @@ mod tests {
                 Property::new(0xD6, vec![0x01, 0x01, 0x30, 0x01]),
                 Property::new(0x80, vec![0x30]),
             ],
-        ));
+        ))
+        .unwrap();
         roundtrip(&buf);
     }
 
@@ -507,7 +521,7 @@ mod tests {
                 get_props: vec![Property::get(0xB0), Property::get(0xBB)],
             },
         };
-        roundtrip(&build(&frame));
+        roundtrip(&build(&frame).unwrap());
     }
 
     #[test]
@@ -528,7 +542,8 @@ mod tests {
             Eoj([0x05, 0xFF, 0x01]),
             Esv::GetSna,
             vec![Property::get(0xFF)],
-        ));
+        ))
+        .unwrap();
         let f = parse(&buf).unwrap();
         assert_eq!(f.esv(), Some(Esv::GetSna));
         assert!(f.esv().unwrap().is_sna());
@@ -542,7 +557,8 @@ mod tests {
             Eoj([0x05, 0xFF, 0x01]),
             Esv::Unknown(0x99),
             vec![Property::get(0x80)],
-        ));
+        ))
+        .unwrap();
         roundtrip(&buf);
         assert_eq!(parse(&buf).unwrap().esv(), Some(Esv::Unknown(0x99)));
     }
@@ -591,5 +607,46 @@ mod tests {
         assert_eq!(e.to_hex(), "013001");
         assert_eq!(e.class_group(), 0x01);
         assert!(Eoj::from_hex("0130").is_err());
+    }
+
+    #[test]
+    fn build_rejects_oversize_edt() {
+        // PDC は u8。256 バイト EDT は wrap で壊れたフレームになるため拒否する。
+        let frame = Frame::standard(
+            0x0001,
+            Eoj([0x05, 0xFF, 0x01]),
+            Eoj([0x01, 0x30, 0x01]),
+            Esv::SetC,
+            vec![Property::new(0x80, vec![0u8; 256])],
+        );
+        assert!(matches!(build(&frame), Err(CodecError::TooLong(_))));
+    }
+
+    #[test]
+    fn build_accepts_edt_at_255_limit() {
+        let frame = Frame::standard(
+            0x0001,
+            Eoj([0x05, 0xFF, 0x01]),
+            Eoj([0x01, 0x30, 0x01]),
+            Esv::SetC,
+            vec![Property::new(0x80, vec![0u8; 255])],
+        );
+        let built = build(&frame).unwrap();
+        // EHD(2)+TID(2)+SEOJ(3)+DEOJ(3)+ESV(1)+OPC(1)+EPC(1) の次が PDC
+        assert_eq!(built[13], 255);
+        roundtrip(&built);
+    }
+
+    #[test]
+    fn build_rejects_oversize_opc() {
+        let many: Vec<Property> = (0..256).map(|_| Property::get(0x80)).collect();
+        let frame = Frame::standard(
+            0x0001,
+            Eoj([0x05, 0xFF, 0x01]),
+            Eoj([0x01, 0x30, 0x01]),
+            Esv::Get,
+            many,
+        );
+        assert!(matches!(build(&frame), Err(CodecError::TooLong(_))));
     }
 }
