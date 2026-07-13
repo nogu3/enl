@@ -42,6 +42,7 @@ task docker:run -- discover
 ```
 
 > ⚠️ If an ECHONET integration (Home Assistant, etc.) holds port 3610, it will steal the responses. Stop it while testing.
+> Overlapping `enl` one-shots retry the bind themselves (`EADDRINUSE` only, 30 ms interval, up to 2 s), so brief collisions with cron/periodic callers resolve without the caller retrying.
 > Sample IPs use the RFC 5737 documentation range `192.0.2.0/24` — replace them with your real device IPs.
 
 ## Usage
@@ -121,7 +122,7 @@ task docker:test   # tests inside Docker (no toolchain needed)
 
 - `src/codec.rs` — frame data model + parse/build. Hand-written, zero-dependency. Round-trip tests guard against parse/build asymmetry bugs.
 - `src/properties.rs` — optional decode layer, incl. the property-map parser (two encodings for ≤15 vs ≥16 properties).
-- `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`). `discover` is a CIDR sweep plus a multicast probe (the standard ECHONET Lite discovery method); `listen` joins the `224.0.23.0` multicast group.
+- `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`; retries `EADDRINUSE` binds for up to 2 s to absorb overlapping one-shots). `discover` is a CIDR sweep plus a multicast probe (the standard ECHONET Lite discovery method); `listen` joins the `224.0.23.0` multicast group.
 - `src/commands.rs` — discover / get / set / describe / raw / listen.
 - `src/schema.rs` — JSON Schema of each subcommand's stdout output (the `schema` subcommand).
 - `src/error.rs` — machine-readable errors + exit codes.

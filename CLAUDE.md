@@ -60,7 +60,7 @@ one-shot の Get/Set/Discovery は単一ソケット + `set_read_timeout` のル
 
 - Home Assistant の ECHONET 統合が動いている間は 3610 を握られている。`SO_REUSEPORT` で共存させてもカーネルが受信データグラムを振り分けるため、**応答が HA 側に吸われて one-shot が無応答になる**（最悪のデバッグ困難ケース）。
 - 検証中は HA の ECHONET 統合を停止する。最終的に本 CLI を唯一のコントローラにする（元のゴールと一致）。
-- バインド失敗は専用 exit code で即座に切り分けられること。
+- バインド失敗は専用 exit code (5) で切り分けられること。`EADDRINUSE` に限り 30ms 間隔・最大 2000ms でリトライしてから失敗する（本 CLI を定期実行する別プロセスの one-shot と手動実行の瞬間衝突を吸収するため）。恒常専有（HA 等）はリトライ枯渇後に exit 5 となり、stderr の detail で「再試行しても解放されず」と区別できる。
 
 ---
 
