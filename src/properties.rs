@@ -22,23 +22,51 @@ pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
         ),
         _ => {}
     }
-    // ノードプロファイル (0x0EF0xx) 固有
-    if eoj.class_group() == 0x0E && eoj.class() == 0xF0 && epc == 0xD6 {
-        return decode_instance_list(edt);
-    }
-    // 電動雨戸・シャッター (0x0263) 固有
-    if eoj.class_group() == 0x02 && eoj.class() == 0x63 {
-        if let Some(v) = decode_shutter(epc, edt) {
-            return Some(v);
-        }
-    }
-    // 家庭用エアコン (0x0130) 固有
-    if eoj.class_group() == 0x01 && eoj.class() == 0x30 {
-        if let Some(v) = decode_aircon(epc, edt) {
-            return Some(v);
-        }
-    }
-    None
+    // クラス固有の数値型 EPC (enum 型は上の enum_prop 経由)
+    (class_def(eoj)?.decode_numeric)(epc, edt)
+}
+
+/// 対応クラスごとの辞書一式。新クラス対応は CLASSES に 1 エントリ足すだけにする。
+struct ClassDef {
+    /// (クラスグループ, クラス)。
+    class: (u8, u8),
+    /// enum 型 EPC の値域テーブル (decode / describe values / set 値名の単一ソース)。
+    enums: &'static [EnumProp],
+    /// EPC 正規名テーブル (クラス固有分。共通は COMMON_EPC)。
+    epc_names: &'static [(u8, &'static str)],
+    /// 数値型など enum 以外のクラス固有 EPC のデコーダ。
+    decode_numeric: fn(u8, &[u8]) -> Option<Value>,
+}
+
+const CLASSES: &[ClassDef] = &[
+    // 家庭用エアコン
+    ClassDef {
+        class: (0x01, 0x30),
+        enums: AIRCON_ENUM,
+        epc_names: AIRCON_EPC,
+        decode_numeric: decode_aircon,
+    },
+    // 電動雨戸・シャッター
+    ClassDef {
+        class: (0x02, 0x63),
+        enums: SHUTTER_ENUM,
+        epc_names: SHUTTER_EPC,
+        decode_numeric: decode_shutter,
+    },
+    // ノードプロファイル
+    ClassDef {
+        class: (0x0E, 0xF0),
+        enums: &[],
+        epc_names: &[],
+        decode_numeric: decode_node_profile,
+    },
+];
+
+/// EOJ のクラスに対応する ClassDef。未対応クラスは None。
+fn class_def(eoj: Eoj) -> Option<&'static ClassDef> {
+    CLASSES
+        .iter()
+        .find(|c| c.class == (eoj.class_group(), eoj.class()))
 }
 
 /// enum 型 EPC の値域定義。decode の値解釈と describe の values 列挙の単一ソース。
@@ -92,18 +120,11 @@ const SHUTTER_ENUM: &[EnumProp] = &[
     },
 ];
 
-/// EOJ のクラスに対応する enum 型 EPC テーブル。未対応クラスは空。
-fn class_enum_table(eoj: Eoj) -> &'static [EnumProp] {
-    match (eoj.class_group(), eoj.class()) {
-        (0x01, 0x30) => AIRCON_ENUM,
-        (0x02, 0x63) => SHUTTER_ENUM,
-        _ => &[],
-    }
-}
-
 /// EPC に対応する enum 値域定義。クラス固有を優先し、無ければ共通から引く。
 fn enum_prop(eoj: Eoj, epc: u8) -> Option<&'static EnumProp> {
-    class_enum_table(eoj)
+    class_def(eoj)
+        .map(|c| c.enums)
+        .unwrap_or(&[])
         .iter()
         .chain(COMMON_ENUM)
         .find(|p| p.epc == epc)
@@ -244,6 +265,14 @@ fn decode_shutter(epc: u8, edt: &[u8]) -> Option<Value> {
     }
 }
 
+/// ノードプロファイル (0x0EF0) 固有 EPC のデコード。
+fn decode_node_profile(epc: u8, edt: &[u8]) -> Option<Value> {
+    match epc {
+        0xD6 => decode_instance_list(edt),
+        _ => None,
+    }
+}
+
 /// 0xD6 自ノードインスタンスリスト: count(1) + EOJ(3)×count。
 fn decode_instance_list(edt: &[u8]) -> Option<Value> {
     if edt.is_empty() {
@@ -354,11 +383,7 @@ const SHUTTER_EPC: &[(u8, &str)] = &[
 
 /// EOJ のクラスに対応する固有 EPC 名テーブル。未対応クラスは空。
 fn class_epc_table(eoj: Eoj) -> &'static [(u8, &'static str)] {
-    match (eoj.class_group(), eoj.class()) {
-        (0x01, 0x30) => AIRCON_EPC,
-        (0x02, 0x63) => SHUTTER_EPC,
-        _ => &[],
-    }
+    class_def(eoj).map(|c| c.epc_names).unwrap_or(&[])
 }
 
 /// EPC → 正規名。クラス固有を優先し、無ければ共通から引く。未知は None。

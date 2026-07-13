@@ -289,17 +289,22 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
     }
 }
 
-/// "62" → Esv。1 バイト hex を ESV として解釈 (未知値は Esv::Unknown で通す)。
-fn parse_esv(s: &str) -> Result<Esv, AppError> {
+/// 2 hex 桁ちょうどの 1 バイトをパースする (ESV / EPC 用)。
+fn parse_hex_byte(s: &str, what: &str) -> Result<u8, AppError> {
     let bytes = codec::hex_to_bytes(s)
-        .map_err(|e| AppError::new(ErrKind::Internal, format!("ESV hex 不正: {e}")))?;
+        .map_err(|e| AppError::new(ErrKind::Internal, format!("{what} hex 不正: {e}")))?;
     if bytes.len() != 1 {
         return Err(AppError::new(
             ErrKind::Internal,
-            "ESV は 1 バイト (2 hex 桁) 必須",
+            format!("{what} は 1 バイト (2 hex 桁) 必須"),
         ));
     }
-    Ok(Esv::from_u8(bytes[0]))
+    Ok(bytes[0])
+}
+
+/// "62" → Esv。1 バイト hex を ESV として解釈 (未知値は Esv::Unknown で通す)。
+fn parse_esv(s: &str) -> Result<Esv, AppError> {
+    parse_hex_byte(s, "ESV").map(Esv::from_u8)
 }
 
 /// "80" or "80:30" → Property。`:` 右が EDT (省略時 PDC=0)。
@@ -351,15 +356,7 @@ fn resolve_edt(eoj: Eoj, epc: u8, token: &str) -> Result<Vec<u8>, AppError> {
 }
 
 fn parse_epc_one(s: &str) -> Result<u8, AppError> {
-    let bytes = codec::hex_to_bytes(s)
-        .map_err(|e| AppError::new(ErrKind::Internal, format!("EPC hex 不正: {e}")))?;
-    if bytes.len() != 1 {
-        return Err(AppError::new(
-            ErrKind::Internal,
-            "EPC は 1 バイト (2 hex 桁) 必須",
-        ));
-    }
-    Ok(bytes[0])
+    parse_hex_byte(s, "EPC")
 }
 
 #[cfg(test)]

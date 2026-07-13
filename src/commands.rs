@@ -48,6 +48,33 @@ fn transport_name(multicast: bool) -> &'static str {
     }
 }
 
+/// get/set/describe 共通の one-shot 送受信。
+/// フレームを送り、応答をパースし、SNA なら device_rejected にする。
+fn request(
+    ip: IpAddr,
+    eoj: Eoj,
+    esv: Esv,
+    props: Vec<Property>,
+    timeout: Duration,
+    multicast: bool,
+) -> Result<(Esv, Vec<Property>), AppError> {
+    let socket = net::open_socket()?;
+    let tid = next_tid();
+    let frame = Frame::standard(tid, CONTROLLER, eoj, esv, props);
+    let dst = dst_for(ip, multicast);
+    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
+    let resp = parse_response(&dg.data)?;
+    standard_or_reject(&resp, eoj)
+}
+
+/// プロパティ列を JSON 配列へ (EDT デコードは seoj のクラス辞書基準)。
+fn props_json(seoj: Eoj, props: &[Property]) -> Vec<Value> {
+    props
+        .iter()
+        .map(|p| property_json(seoj, p.epc, &p.edt))
+        .collect()
+}
+
 /// sweep + multicast 併用の discovery。
 ///
 /// 指定 CIDR (or iface IP の /24) 内の全ホストへ unicast `Get 0EF001 D6` を送り、
@@ -221,27 +248,15 @@ pub fn get(
     timeout: Duration,
     multicast: bool,
 ) -> Result<Value, AppError> {
-    let socket = net::open_socket()?;
     let props: Vec<Property> = epcs.iter().map(|&e| Property::get(e)).collect();
-    let tid = next_tid();
-    let frame = Frame::standard(tid, CONTROLLER, eoj, Esv::Get, props);
-    let dst = dst_for(ip, multicast);
     tracing::info!(%ip, eoj = eoj.to_hex(), transport = transport_name(multicast), "get 送信");
 
-    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
-    let resp = parse_response(&dg.data)?;
-
-    let (esv, props) = standard_or_reject(&resp, eoj)?;
-    let properties: Vec<Value> = props
-        .iter()
-        .map(|p| property_json(eoj, p.epc, &p.edt))
-        .collect();
-
+    let (esv, props) = request(ip, eoj, Esv::Get, props, timeout, multicast)?;
     Ok(json!({
         "ip": ip.to_string(),
         "eoj": eoj.to_hex(),
         "esv": esv.name(),
-        "properties": properties,
+        "properties": props_json(eoj, &props),
     }))
 }
 
@@ -254,33 +269,18 @@ pub fn set(
     timeout: Duration,
     multicast: bool,
 ) -> Result<Value, AppError> {
-    let socket = net::open_socket()?;
-    let tid = next_tid();
-    let frame = Frame::standard(
-        tid,
-        CONTROLLER,
-        eoj,
-        Esv::SetC,
-        vec![Property::new(epc, edt)],
-    );
-    let dst = dst_for(ip, multicast);
     tracing::info!(%ip, eoj = eoj.to_hex(), epc = format!("{epc:02X}"), transport = transport_name(multicast), "set 送信");
 
-    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
-    let resp = parse_response(&dg.data)?;
-    let (esv, props) = standard_or_reject(&resp, eoj)?;
+    let props = vec![Property::new(epc, edt)];
+    let (esv, props) = request(ip, eoj, Esv::SetC, props, timeout, multicast)?;
 
     // Set_Res は EDT 無し (PDC=0) のプロパティが返る。
-    let properties: Vec<Value> = props
-        .iter()
-        .map(|p| property_json(eoj, p.epc, &p.edt))
-        .collect();
     Ok(json!({
         "ip": ip.to_string(),
         "eoj": eoj.to_hex(),
         "esv": esv.name(),
         "result": "accepted",
-        "properties": properties,
+        "properties": props_json(eoj, &props),
     }))
 }
 
@@ -291,25 +291,14 @@ pub fn describe(
     timeout: Duration,
     multicast: bool,
 ) -> Result<Value, AppError> {
-    let socket = net::open_socket()?;
-    let tid = next_tid();
-    let frame = Frame::standard(
-        tid,
-        CONTROLLER,
-        eoj,
-        Esv::Get,
-        vec![
-            Property::get(EPC_GET_MAP),
-            Property::get(EPC_SET_MAP),
-            Property::get(EPC_INF_MAP),
-        ],
-    );
-    let dst = dst_for(ip, multicast);
     tracing::info!(%ip, eoj = eoj.to_hex(), transport = transport_name(multicast), "describe 送信");
 
-    let dg = net::send_and_recv_one(&socket, dst, ip, tid, &codec::build(&frame), timeout)?;
-    let resp = parse_response(&dg.data)?;
-    let (esv, props) = standard_or_reject(&resp, eoj)?;
+    let props = vec![
+        Property::get(EPC_GET_MAP),
+        Property::get(EPC_SET_MAP),
+        Property::get(EPC_INF_MAP),
+    ];
+    let (esv, props) = request(ip, eoj, Esv::Get, props, timeout, multicast)?;
 
     let mut out = json!({ "ip": ip.to_string(), "eoj": eoj.to_hex(), "esv": esv.name() });
     for p in &props {
@@ -504,17 +493,13 @@ fn inf_event(
     if epc.is_some_and(|e| !props.iter().any(|p| p.epc == e)) {
         return None;
     }
-    let properties: Vec<Value> = props
-        .iter()
-        .map(|p| property_json(seoj, p.epc, &p.edt))
-        .collect();
     Some(json!({
         "ip": src.to_string(),
         "tid": format!("{:04x}", frame.tid),
         "seoj": seoj.to_hex(),
         "deoj": deoj.to_hex(),
         "esv": esv.name(),
-        "properties": properties,
+        "properties": props_json(seoj, props),
     }))
 }
 
@@ -544,12 +529,6 @@ fn reply_infc_res(socket: &std::net::UdpSocket, src: IpAddr, frame: &Frame) {
 
 /// Frame をロスレスに JSON へダンプ (raw 用)。EDT デコードは応答 SEOJ 基準で best-effort。
 fn frame_to_json(frame: &Frame) -> Value {
-    let props_json = |seoj: Eoj, props: &[Property]| -> Vec<Value> {
-        props
-            .iter()
-            .map(|p| property_json(seoj, p.epc, &p.edt))
-            .collect()
-    };
     let mut v = json!({
         "ehd2": format!("{:02x}", frame.ehd2),
         "tid": format!("{:04x}", frame.tid),

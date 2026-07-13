@@ -568,6 +568,15 @@ mod tests {
     }
 
     #[test]
+    fn esv_u8_roundtrip_all_values() {
+        // from_u8 / to_u8 の手書き 2 表が食い違うと ESV 追加時に静かに壊れる。
+        // 全 256 値 (既知 + Unknown) でラウンドトリップを担保する。
+        for v in 0x00..=0xFFu8 {
+            assert_eq!(Esv::from_u8(v).to_u8(), v, "ESV 0x{v:02X} が不一致");
+        }
+    }
+
+    #[test]
     fn hex_helpers() {
         assert_eq!(hex_to_bytes("01a3").unwrap(), vec![0x01, 0xA3]);
         assert_eq!(hex_to_bytes("0x0EF001").unwrap(), vec![0x0E, 0xF0, 0x01]);
