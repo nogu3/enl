@@ -4,8 +4,8 @@
 //! よって送受信ソケットを 0.0.0.0:3610 にバインドして専有する。
 //!
 //! discover は CIDR sweep (各ホストへ unicast Get) と multicast (224.0.23.0) の
-//! 常時併用。multicast にしか応答しない実機 (AIF 認証済み機器で確認) が存在する
-//! ため sweep だけでは不十分。multicast の egress インタフェースは制御しない
+//! 常時併用。multicast は ECHONET Lite 標準の探索方式で、CIDR 不明でも引数なしで
+//! 探索できる。multicast の egress インタフェースは制御しない
 //! (ルーティングテーブル任せ)。制御には socket2 等の依存追加が要るため、
 //! 依存ゼロ方針を優先した既知の制約 (実需が出たら -i 連動で追加する)。
 

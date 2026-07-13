@@ -128,3 +128,21 @@ enl raw 192.0.2.22 ... --multicast
 3. `enl set <ip> <eoj> 80 30 --multicast` で実照明が点灯し、SetRes が返る。
 4. `--multicast` なしの全コマンドの挙動・出力・exit code が現状と一致する。
 5. `cargo test` / `cargo clippy -- -D warnings` が通る。
+
+---
+
+## 追記 (2026-07-13): 実機検証による前提の訂正
+
+実装完了後、LAN 直結の Linux ホストから実機検証した結果、本 spec の背景にある
+「WTY2001 は unicast を一切処理せず multicast にのみ応答する」という観測は
+**誤りだった**ことが判明した。LAN 直結ホストからは WTY2001 を含む全機器が
+unicast Get に応答する。unicast 無視に見えたのは、WSL2 / Windows 越しの UDP が
+エフェメラル送信元ポートからの応答を取りこぼす検証環境のアーティファクトだった。
+
+実装した機能はすべて有効なまま維持する。根拠は以下に読み替える:
+
+- multicast discovery は ECHONET Lite 標準の探索方式であり、CIDR 不明でも
+  `enl discover` が引数なしで動く（実測で LAN 上 7 ノードを発見）。
+- `--multicast` フラグは、経路上で unicast が損なわれる環境や機器差異の切り分けに
+  使える明示的な送信先切替として残す。
+- 受け入れ条件 1〜5 はすべて実機で合格（unicast でも同結果になる点のみ当初想定と異なる）。
