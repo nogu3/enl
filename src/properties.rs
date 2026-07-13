@@ -404,6 +404,18 @@ pub fn epc_for_name(eoj: Eoj, name: &str) -> Option<u8> {
         .map(|(e, _)| *e)
 }
 
+/// describe のマップ 1 エントリ: EPC hex + 辞書にあれば name、enum 型なら values。
+pub fn map_entry_json(eoj: Eoj, epc: u8) -> Value {
+    let mut obj = json!({ "epc": format!("{epc:02X}") });
+    if let Some(name) = epc_name(eoj, epc) {
+        obj["name"] = json!(name);
+    }
+    if let Some(values) = epc_values(eoj, epc) {
+        obj["values"] = values;
+    }
+    obj
+}
+
 /// edt を常に hex で、名前/デコード値があれば併記した JSON を返す。
 pub fn property_json(eoj: Eoj, epc: u8, edt: &[u8]) -> Value {
     let mut obj = json!({
@@ -642,5 +654,24 @@ mod tests {
         assert_eq!(v["epc"], "B0");
         assert_eq!(v["name"], "operation_mode");
         assert_eq!(v["value"]["operation_mode"], "cool");
+    }
+
+    #[test]
+    fn map_entry_json_shapes() {
+        let shutter = Eoj([0x02, 0x63, 1]);
+        // enum 型: name + values 併記
+        let v = map_entry_json(shutter, 0xE0);
+        assert_eq!(v["epc"], "E0");
+        assert_eq!(v["name"], "open_close_operation");
+        assert_eq!(v["values"]["42"], "close");
+        // 数値型: name のみ (values 無し)
+        let v = map_entry_json(shutter, 0xE1);
+        assert_eq!(v["name"], "open_level");
+        assert!(v.get("values").is_none());
+        // 未知 EPC: epc のみ
+        let v = map_entry_json(shutter, 0x77);
+        assert_eq!(v["epc"], "77");
+        assert!(v.get("name").is_none());
+        assert!(v.get("values").is_none());
     }
 }

@@ -312,16 +312,7 @@ pub fn describe(
             Some(epcs) => {
                 out[key] = json!(epcs
                     .iter()
-                    .map(|&e| {
-                        let mut o = json!({ "epc": format!("{e:02X}") });
-                        if let Some(name) = properties::epc_name(eoj, e) {
-                            o["name"] = json!(name);
-                        }
-                        if let Some(values) = properties::epc_values(eoj, e) {
-                            o["values"] = values;
-                        }
-                        o
-                    })
+                    .map(|&e| properties::map_entry_json(eoj, e))
                     .collect::<Vec<_>>());
             }
             // 壊れた / 空マップでも生 hex は残す。
