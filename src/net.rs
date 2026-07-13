@@ -93,29 +93,10 @@ pub fn recv_one(
 /// `window` の間 recv を集める (sweep discovery 用)。
 /// 送信は呼び出し側で複数 send_to を済ませる前提。
 pub fn collect_until(socket: &UdpSocket, window: Duration) -> Result<Vec<Datagram>, AppError> {
-    let mut out = Vec::new();
     let deadline = Instant::now() + window;
-    let mut buf = [0u8; 1500];
-    loop {
-        let remaining = match deadline.checked_duration_since(Instant::now()) {
-            Some(d) if !d.is_zero() => d,
-            _ => break,
-        };
-        socket
-            .set_read_timeout(Some(remaining))
-            .map_err(|e| AppError::new(ErrKind::Network, format!("set_read_timeout 失敗: {e}")))?;
-        match socket.recv_from(&mut buf) {
-            Ok((n, from)) => out.push(Datagram {
-                from,
-                data: buf[..n].to_vec(),
-            }),
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                break
-            }
-            Err(e) => return Err(AppError::new(ErrKind::Network, format!("受信失敗: {e}"))),
-        }
+    let mut out = Vec::new();
+    while let Some(dg) = recv_one(socket, Some(deadline))? {
+        out.push(dg);
     }
     Ok(out)
 }
@@ -136,38 +117,13 @@ pub fn send_and_recv_one(
         .send_to(payload, dst)
         .map_err(|e| AppError::new(ErrKind::Network, format!("送信失敗: {e}")))?;
 
-    socket
-        .set_read_timeout(Some(timeout))
-        .map_err(|e| AppError::new(ErrKind::Network, format!("set_read_timeout 失敗: {e}")))?;
-
-    let mut buf = [0u8; 1500];
     let deadline = Instant::now() + timeout;
-    loop {
-        // 期待送信元以外や EHD/TID 不一致 (他機器・他コントローラのフレーム) は読み飛ばす。
-        match socket.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                if from.ip() == expect && is_reply_candidate(&buf[..n], tid) {
-                    return Ok(Datagram {
-                        from,
-                        data: buf[..n].to_vec(),
-                    });
-                }
-                tracing::debug!(%from, len = n, "不一致フレームをスキップ (送信元/EHD/TID)");
-                // 残り時間で再試行。
-                match deadline.checked_duration_since(Instant::now()) {
-                    Some(d) if !d.is_zero() => {
-                        let _ = socket.set_read_timeout(Some(d));
-                    }
-                    _ => break,
-                }
-            }
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                break
-            }
-            Err(e) => return Err(AppError::new(ErrKind::Network, format!("受信失敗: {e}"))),
+    // 期待送信元以外や EHD/TID 不一致 (他機器・他コントローラのフレーム) は読み飛ばす。
+    while let Some(dg) = recv_one(socket, Some(deadline))? {
+        if dg.from.ip() == expect && is_reply_candidate(&dg.data, tid) {
+            return Ok(dg);
         }
+        tracing::debug!(from = %dg.from, len = dg.data.len(), "不一致フレームをスキップ (送信元/EHD/TID)");
     }
     Err(AppError::new(
         ErrKind::Timeout,
