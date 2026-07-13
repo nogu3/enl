@@ -27,17 +27,68 @@ pub fn is_reply_candidate(data: &[u8], tid: u16) -> bool {
     data.len() >= 4 && data[0..2] == [0x10, 0x81] && data[2..4] == tid.to_be_bytes()
 }
 
-/// 3610 を専有する UDP ソケットを開く。バインド失敗は bind エラー (exit 5)。
+/// bind リトライの間隔と最大待ち時間。本 CLI を定期実行する別プロセス
+/// (cron / 常駐アプリの one-shot 呼び出し) との瞬間的な 3610 衝突を吸収する。
+/// 恒常専有 (HA 等) は窓を使い切って従来どおり exit 5 になる。
+/// 窓 2000ms の根拠: 相手側 one-shot が応答タイムアウト (既定 2000ms) いっぱい
+/// 専有し続ける最悪ケースを 1 回分は跨げる長さ。
+const BIND_RETRY_INTERVAL: Duration = Duration::from_millis(30);
+const BIND_RETRY_WINDOW: Duration = Duration::from_millis(2000);
+
+/// 3610 を専有する UDP ソケットを開く。AddrInUse は BIND_RETRY_WINDOW まで
+/// リトライし、それ以外のバインド失敗は即 bind エラー (exit 5)。
 pub fn open_socket() -> Result<UdpSocket, AppError> {
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, ECHONET_PORT);
-    UdpSocket::bind(bind_addr).map_err(|e| {
-        AppError::new(
-            ErrKind::Bind,
-            format!(
-                "0.0.0.0:{ECHONET_PORT} へのバインド失敗: {e}。HA 等が 3610 を専有していないか確認"
-            ),
-        )
-    })
+    bind_with_retry(bind_addr, BIND_RETRY_WINDOW, BIND_RETRY_INTERVAL)
+}
+
+/// addr への bind を AddrInUse に限り interval 間隔で window までリトライする。
+/// one-shot 同士の瞬間衝突 (数十 ms) を吸収するのが目的で、AddrInUse 以外の
+/// エラー (権限・アドレス不在等) はリトライしても直らないため即失敗させる。
+fn bind_with_retry(
+    addr: SocketAddrV4,
+    window: Duration,
+    interval: Duration,
+) -> Result<UdpSocket, AppError> {
+    let deadline = Instant::now() + window;
+    let mut waited = false;
+    loop {
+        match UdpSocket::bind(addr) {
+            Ok(s) => {
+                if waited {
+                    tracing::info!(%addr, "解放を確認、バインド成功");
+                }
+                return Ok(s);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                if Instant::now() >= deadline {
+                    return Err(AppError::new(
+                        ErrKind::Bind,
+                        format!(
+                            "{addr} へのバインド失敗: {e}。{}ms 再試行しても解放されず。HA 等の常駐コントローラが専有していないか確認",
+                            window.as_millis()
+                        ),
+                    ));
+                }
+                if !waited {
+                    // 対話利用時に無言で待たないよう、待ち始めに 1 回だけ知らせる
+                    tracing::info!(
+                        %addr,
+                        "使用中 (他の one-shot と衝突の可能性)。最大 {}ms 解放を待つ",
+                        window.as_millis()
+                    );
+                    waited = true;
+                }
+                std::thread::sleep(interval);
+            }
+            Err(e) => {
+                return Err(AppError::new(
+                    ErrKind::Bind,
+                    format!("{addr} へのバインド失敗: {e}"),
+                ));
+            }
+        }
+    }
 }
 
 /// INF 通知の待受用に 224.0.23.0 へ join する。
@@ -205,5 +256,64 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind, crate::error::ErrKind::Timeout);
+    }
+
+    #[test]
+    fn bind_retry_succeeds_after_release() {
+        let holder = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = match holder.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            _ => unreachable!(),
+        };
+        // 100ms 後に holder がポートを解放する = 他の one-shot の専有が終わる状況
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(holder);
+        });
+        let sock = bind_with_retry(
+            addr,
+            Duration::from_millis(2000),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(sock.local_addr().unwrap(), SocketAddr::V4(addr));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn bind_retry_times_out_when_never_released() {
+        let _holder = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = match _holder.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            _ => unreachable!(),
+        };
+        let start = Instant::now();
+        let err = bind_with_retry(
+            addr,
+            Duration::from_millis(120),
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, crate::error::ErrKind::Bind);
+        assert!(err.detail.contains("解放されず"), "detail={}", err.detail);
+        // 窓いっぱいまでは粘る
+        assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn bind_fails_immediately_on_non_addrinuse() {
+        // 192.0.2.1 (RFC 5737) はローカルに存在しないアドレス
+        // → EADDRNOTAVAIL であり AddrInUse ではないので即失敗すること
+        let addr = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 39610);
+        let start = Instant::now();
+        let err = bind_with_retry(
+            addr,
+            Duration::from_millis(2000),
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, crate::error::ErrKind::Bind);
+        assert!(!err.detail.contains("解放されず"), "detail={}", err.detail);
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 }
