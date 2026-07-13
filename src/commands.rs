@@ -392,6 +392,30 @@ impl EojFilter {
     }
 }
 
+/// listen の採用フィルタ (--from / --eoj / --epc)。全 None なら全通知を採用。
+#[derive(Default)]
+pub struct ListenFilter {
+    pub from: Option<IpAddr>,
+    pub eoj: Option<EojFilter>,
+    pub epc: Option<u8>,
+}
+
+impl ListenFilter {
+    /// 通知 (src から SEOJ=seoj, プロパティ=props) がフィルタを通過するか。
+    fn accepts(&self, src: IpAddr, seoj: Eoj, props: &[Property]) -> bool {
+        if self.from.is_some_and(|ip| ip != src) {
+            return false;
+        }
+        if self.eoj.as_ref().is_some_and(|f| !f.matches(seoj)) {
+            return false;
+        }
+        if self.epc.is_some_and(|e| !props.iter().any(|p| p.epc == e)) {
+            return false;
+        }
+        true
+    }
+}
+
 /// INF / INFC 通知を待ち受けて収集する (one-shot: count 件か deadline で終了)。
 ///
 /// 3610 を bind し 224.0.23.0 に join して INF (0x73) / INFC (0x74) のみ採用する。
@@ -401,9 +425,7 @@ pub fn listen(
     iface: Option<Ipv4Addr>,
     count: usize,
     timeout: Option<Duration>,
-    from: Option<IpAddr>,
-    eoj_filter: Option<EojFilter>,
-    epc: Option<u8>,
+    filter: ListenFilter,
 ) -> Result<Value, AppError> {
     let socket = net::open_socket()?;
     net::join_multicast(&socket, iface)?;
@@ -427,13 +449,7 @@ pub fn listen(
                 continue;
             }
         };
-        match inf_event(
-            dg.from.ip(),
-            &frame,
-            from.as_ref(),
-            eoj_filter.as_ref(),
-            epc,
-        ) {
+        match inf_event(dg.from.ip(), &frame, &filter) {
             Some(event) => {
                 tracing::info!(from = %dg.from, "INF 受信");
                 reply_infc_res(&socket, dg.from.ip(), &frame);
@@ -457,13 +473,7 @@ pub fn listen(
 
 /// 受信フレームが採用すべき INF / INFC 通知なら event JSON にする。
 /// 非通知 ESV・フィルタ不一致は None。
-fn inf_event(
-    src: IpAddr,
-    frame: &Frame,
-    from: Option<&IpAddr>,
-    eoj_filter: Option<&EojFilter>,
-    epc: Option<u8>,
-) -> Option<Value> {
+fn inf_event(src: IpAddr, frame: &Frame, filter: &ListenFilter) -> Option<Value> {
     let (seoj, deoj, esv, props) = match &frame.edata {
         Edata::Standard {
             seoj,
@@ -476,13 +486,7 @@ fn inf_event(
     if !matches!(esv, Esv::Inf | Esv::InfC) {
         return None;
     }
-    if from.is_some_and(|ip| *ip != src) {
-        return None;
-    }
-    if eoj_filter.is_some_and(|f| !f.matches(seoj)) {
-        return None;
-    }
-    if epc.is_some_and(|e| !props.iter().any(|p| p.epc == e)) {
+    if !filter.accepts(src, seoj, props) {
         return None;
     }
     Some(json!({
@@ -741,7 +745,7 @@ mod tests {
     #[test]
     fn inf_event_accepts_inf_and_decodes() {
         let src: IpAddr = "192.0.2.20".parse().unwrap();
-        let ev = inf_event(src, &inf_frame(Esv::Inf), None, None, None).unwrap();
+        let ev = inf_event(src, &inf_frame(Esv::Inf), &ListenFilter::default()).unwrap();
         assert_eq!(ev["ip"], "192.0.2.20");
         assert_eq!(ev["tid"], "00ab");
         assert_eq!(ev["seoj"], "029101");
@@ -755,8 +759,9 @@ mod tests {
     #[test]
     fn inf_event_rejects_non_notification() {
         let src: IpAddr = "192.0.2.20".parse().unwrap();
-        assert!(inf_event(src, &inf_frame(Esv::GetRes), None, None, None).is_none());
-        assert!(inf_event(src, &inf_frame(Esv::Get), None, None, None).is_none());
+        let f = ListenFilter::default();
+        assert!(inf_event(src, &inf_frame(Esv::GetRes), &f).is_none());
+        assert!(inf_event(src, &inf_frame(Esv::Get), &f).is_none());
     }
 
     #[test]
@@ -764,17 +769,42 @@ mod tests {
         let src: IpAddr = "192.0.2.20".parse().unwrap();
         let other: IpAddr = "192.0.2.99".parse().unwrap();
         let f = inf_frame(Esv::Inf);
+        let with = |filter: ListenFilter| inf_event(src, &f, &filter);
         // from フィルタ
-        assert!(inf_event(src, &f, Some(&src), None, None).is_some());
-        assert!(inf_event(src, &f, Some(&other), None, None).is_none());
+        assert!(with(ListenFilter {
+            from: Some(src),
+            ..Default::default()
+        })
+        .is_some());
+        assert!(with(ListenFilter {
+            from: Some(other),
+            ..Default::default()
+        })
+        .is_none());
         // eoj フィルタ (クラス / 完全一致 / 不一致)
         let class = EojFilter::from_hex("0291").unwrap();
         let miss = EojFilter::from_hex("013001").unwrap();
-        assert!(inf_event(src, &f, None, Some(&class), None).is_some());
-        assert!(inf_event(src, &f, None, Some(&miss), None).is_none());
+        assert!(with(ListenFilter {
+            eoj: Some(class),
+            ..Default::default()
+        })
+        .is_some());
+        assert!(with(ListenFilter {
+            eoj: Some(miss),
+            ..Default::default()
+        })
+        .is_none());
         // epc フィルタ
-        assert!(inf_event(src, &f, None, None, Some(0x80)).is_some());
-        assert!(inf_event(src, &f, None, None, Some(0xB0)).is_none());
+        assert!(with(ListenFilter {
+            epc: Some(0x80),
+            ..Default::default()
+        })
+        .is_some());
+        assert!(with(ListenFilter {
+            epc: Some(0xB0),
+            ..Default::default()
+        })
+        .is_none());
     }
 
     #[test]
