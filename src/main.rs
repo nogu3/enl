@@ -252,14 +252,17 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             if count == 0 {
                 return Err(AppError::new(ErrKind::Usage, "--count は 1 以上"));
             }
-            let eoj_filter = eoj
-                .as_deref()
-                .map(commands::EojFilter::from_hex)
-                .transpose()?;
-            let epc = epc.as_deref().map(parse_epc_one).transpose()?;
+            let filter = commands::ListenFilter {
+                from,
+                eoj: eoj
+                    .as_deref()
+                    .map(commands::EojFilter::from_hex)
+                    .transpose()?,
+                epc: epc.as_deref().map(parse_epc_one).transpose()?,
+            };
             // 0 は無期限 (count 件集まるまで待つ)。
             let timeout = (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms));
-            commands::listen(iface, count, timeout, from, eoj_filter, epc)
+            commands::listen(iface, count, timeout, filter)
         }
         Command::Schema { target } => Ok(schema::for_target(target)),
     }
