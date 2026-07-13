@@ -274,7 +274,7 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             epc,
         } => {
             if count == 0 {
-                return Err(AppError::new(ErrKind::Internal, "--count は 1 以上"));
+                return Err(AppError::new(ErrKind::Usage, "--count は 1 以上"));
             }
             let eoj_filter = eoj
                 .as_deref()
@@ -292,10 +292,10 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
 /// 2 hex 桁ちょうどの 1 バイトをパースする (ESV / EPC 用)。
 fn parse_hex_byte(s: &str, what: &str) -> Result<u8, AppError> {
     let bytes = codec::hex_to_bytes(s)
-        .map_err(|e| AppError::new(ErrKind::Internal, format!("{what} hex 不正: {e}")))?;
+        .map_err(|e| AppError::new(ErrKind::Usage, format!("{what} hex 不正: {e}")))?;
     if bytes.len() != 1 {
         return Err(AppError::new(
-            ErrKind::Internal,
+            ErrKind::Usage,
             format!("{what} は 1 バイト (2 hex 桁) 必須"),
         ));
     }
@@ -318,13 +318,13 @@ fn parse_prop_arg(s: &str) -> Result<Property, AppError> {
         Vec::new()
     } else {
         codec::hex_to_bytes(edt_s)
-            .map_err(|e| AppError::new(ErrKind::Internal, format!("EDT hex 不正 '{edt_s}': {e}")))?
+            .map_err(|e| AppError::new(ErrKind::Usage, format!("EDT hex 不正 '{edt_s}': {e}")))?
     };
     Ok(Property::new(epc, edt))
 }
 
 fn parse_eoj(s: &str) -> Result<Eoj, AppError> {
-    Eoj::from_hex(s).map_err(|e| AppError::new(ErrKind::Internal, format!("EOJ 不正: {e}")))
+    Eoj::from_hex(s).map_err(|e| AppError::new(ErrKind::Usage, format!("EOJ 不正: {e}")))
 }
 
 fn resolve_epcs(eoj: Eoj, items: &[String]) -> Result<Vec<u8>, AppError> {
@@ -339,7 +339,7 @@ fn resolve_epc(eoj: Eoj, token: &str) -> Result<u8, AppError> {
     }
     parse_epc_one(token).map_err(|_| {
         AppError::new(
-            ErrKind::Internal,
+            ErrKind::Usage,
             format!("EPC 解決失敗 '{token}' (既知の名前でも 2 hex 桁でもない)"),
         )
     })
@@ -352,7 +352,7 @@ fn resolve_edt(eoj: Eoj, epc: u8, token: &str) -> Result<Vec<u8>, AppError> {
         return Ok(vec![b]);
     }
     codec::hex_to_bytes(token)
-        .map_err(|e| AppError::new(ErrKind::Internal, format!("EDT hex 不正: {e}")))
+        .map_err(|e| AppError::new(ErrKind::Usage, format!("EDT hex 不正: {e}")))
 }
 
 fn parse_epc_one(s: &str) -> Result<u8, AppError> {
@@ -431,5 +431,22 @@ mod tests {
         assert_eq!(resolve_edt(shutter, 0xE1, "32").unwrap(), vec![0x32]);
         // 名前でも hex でもない
         assert!(resolve_edt(shutter, 0xE0, "bogus").is_err());
+    }
+
+    #[test]
+    fn user_input_errors_are_usage_kind() {
+        let aircon = Eoj::from_hex("013001").unwrap();
+        assert_eq!(
+            resolve_epc(aircon, "bogus").unwrap_err().kind,
+            ErrKind::Usage
+        );
+        assert_eq!(parse_eoj("zz").unwrap_err().kind, ErrKind::Usage);
+        assert_eq!(parse_esv("6201").unwrap_err().kind, ErrKind::Usage);
+        assert_eq!(
+            resolve_edt(Eoj::from_hex("026301").unwrap(), 0xE0, "bogus")
+                .unwrap_err()
+                .kind,
+            ErrKind::Usage
+        );
     }
 }

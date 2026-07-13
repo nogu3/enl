@@ -10,7 +10,7 @@ pub enum ErrKind {
     Network,        // exit 5
     Bind,           // exit 5
     Parse,          // exit 1
-    Internal,       // exit 1
+    Usage,          // exit 1 (enl 側で検出した入力不正。clap の exit 2 とは別)
 }
 
 impl ErrKind {
@@ -21,7 +21,7 @@ impl ErrKind {
             ErrKind::Network => "network",
             ErrKind::Bind => "bind",
             ErrKind::Parse => "parse",
-            ErrKind::Internal => "internal",
+            ErrKind::Usage => "usage",
         }
     }
 
@@ -31,7 +31,7 @@ impl ErrKind {
             ErrKind::Timeout => 3,
             ErrKind::DeviceRejected => 4,
             ErrKind::Network | ErrKind::Bind => 5,
-            ErrKind::Parse | ErrKind::Internal => 1,
+            ErrKind::Parse | ErrKind::Usage => 1,
         }
     }
 }
@@ -79,3 +79,14 @@ impl std::fmt::Display for AppError {
 }
 
 impl std::error::Error for AppError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_kind_maps_to_exit_1() {
+        assert_eq!(ErrKind::Usage.as_str(), "usage");
+        assert_eq!(ErrKind::Usage.exit_code(), 1);
+    }
+}
