@@ -270,12 +270,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             drop(holder);
         });
-        let sock = bind_with_retry(
-            addr,
-            Duration::from_millis(2000),
-            Duration::from_millis(10),
-        )
-        .unwrap();
+        let sock =
+            bind_with_retry(addr, Duration::from_millis(2000), Duration::from_millis(10)).unwrap();
         assert_eq!(sock.local_addr().unwrap(), SocketAddr::V4(addr));
         t.join().unwrap();
     }
@@ -288,12 +284,8 @@ mod tests {
             _ => unreachable!(),
         };
         let start = Instant::now();
-        let err = bind_with_retry(
-            addr,
-            Duration::from_millis(120),
-            Duration::from_millis(10),
-        )
-        .unwrap_err();
+        let err = bind_with_retry(addr, Duration::from_millis(120), Duration::from_millis(10))
+            .unwrap_err();
         assert_eq!(err.kind, crate::error::ErrKind::Bind);
         assert!(err.detail.contains("解放されず"), "detail={}", err.detail);
         // 窓いっぱいまでは粘る
@@ -306,12 +298,8 @@ mod tests {
         // → EADDRNOTAVAIL であり AddrInUse ではないので即失敗すること
         let addr = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 39610);
         let start = Instant::now();
-        let err = bind_with_retry(
-            addr,
-            Duration::from_millis(2000),
-            Duration::from_millis(10),
-        )
-        .unwrap_err();
+        let err = bind_with_retry(addr, Duration::from_millis(2000), Duration::from_millis(10))
+            .unwrap_err();
         assert_eq!(err.kind, crate::error::ErrKind::Bind);
         assert!(!err.detail.contains("解放されず"), "detail={}", err.detail);
         assert!(start.elapsed() < Duration::from_millis(500));
