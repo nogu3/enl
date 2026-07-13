@@ -4,25 +4,34 @@
 //! 破壊的変更を避ける拠り所として機械可読スキーマをここに固定する。
 //! `enl schema [cmd]` で取得でき、消費側はこれをスキーマ取得に使える。
 
+use clap::ValueEnum;
 use serde_json::{json, Value};
 
 const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
-/// 対象サブコマンド名 (網羅性テスト用)。
-#[cfg(test)]
-const TARGETS: [&str; 6] = ["discover", "get", "set", "describe", "raw", "listen"];
+/// `enl schema` の対象サブコマンド。clap が未知値を弾く (exit 2)。
+/// ここで enum を持ち match を網羅させることで、サブコマンド追加時の
+/// スキーマ実装漏れをコンパイルエラーで検出する。
+#[derive(Clone, Copy, ValueEnum)]
+pub enum SchemaTarget {
+    Discover,
+    Get,
+    Set,
+    Describe,
+    Raw,
+    Listen,
+}
 
 /// 名前指定があればそのスキーマ、無ければ全サブコマンドのスキーマ集約。
-pub fn for_target(target: Option<&str>) -> Value {
+pub fn for_target(target: Option<SchemaTarget>) -> Value {
     match target {
-        Some("discover") => discover(),
-        Some("get") => get(),
-        Some("set") => set(),
-        Some("describe") => describe(),
-        Some("raw") => raw(),
-        Some("listen") => listen(),
-        // CLI 側 (ValueEnum) で未知値は弾かれるため、ここには来ない。
-        Some(_) | None => all(),
+        None => all(),
+        Some(SchemaTarget::Discover) => discover(),
+        Some(SchemaTarget::Get) => get(),
+        Some(SchemaTarget::Set) => set(),
+        Some(SchemaTarget::Describe) => describe(),
+        Some(SchemaTarget::Raw) => raw(),
+        Some(SchemaTarget::Listen) => listen(),
     }
 }
 
@@ -241,25 +250,29 @@ fn listen() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ValueEnum;
 
     #[test]
     fn all_covers_every_target() {
         let all = all();
         let obj = all.as_object().unwrap();
-        assert_eq!(obj.len(), TARGETS.len());
-        for t in TARGETS {
-            assert!(obj.contains_key(t), "{t} 欠落");
+        let variants = SchemaTarget::value_variants();
+        assert_eq!(obj.len(), variants.len());
+        for t in variants {
+            let name = t.to_possible_value().unwrap().get_name().to_string();
+            assert!(obj.contains_key(&name), "{name} 欠落");
         }
     }
 
     #[test]
     fn each_schema_is_valid_object_with_dialect() {
-        for t in TARGETS {
-            let s = for_target(Some(t));
-            assert_eq!(s["$schema"], DIALECT, "{t} に $schema 無し");
-            assert_eq!(s["type"], "object", "{t} の type が object でない");
-            assert!(s["properties"].is_object(), "{t} に properties 無し");
-            assert!(s["required"].is_array(), "{t} に required 無し");
+        for t in SchemaTarget::value_variants() {
+            let name = t.to_possible_value().unwrap().get_name().to_string();
+            let s = for_target(Some(*t));
+            assert_eq!(s["$schema"], DIALECT, "{name} に $schema 無し");
+            assert_eq!(s["type"], "object", "{name} の type が object でない");
+            assert!(s["properties"].is_object(), "{name} に properties 無し");
+            assert!(s["required"].is_array(), "{name} に required 無し");
         }
     }
 
