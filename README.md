@@ -9,15 +9,52 @@
 
 It's built to be **AI-native and UNIX-friendly**: `stdout` is pure structured JSON (one command = one JSON object), so `jq` and LLM function-calling can consume it directly. Diagnostics and machine-readable errors go to `stderr`. Distinct exit codes let `cron` / `n8n` branch on the outcome.
 
-## Why
+## Demo
 
-Heavy smart-home stacks (e.g. Home Assistant) hide their data model and offer poor observability. `enl` takes the opposite approach — a thin, transparent tool that does ECHONET Lite well and lets external orchestration (cron, n8n, scripts) compose it. It is the first in a planned family of lightweight per-protocol smart-home CLIs.
+Find every ECHONET Lite device on the LAN:
 
-## Design principles
+```bash
+$ enl discover
+```
 
-- **Stateless / one-shot** — open socket → send → collect with timeout → exit. No daemonization.
-- **`stdout` is pure structured JSON only** — no logs, progress, or decoration mixed in.
-- **Diagnostics to `stderr`** — `tracing` structured logs + machine-readable error JSON.
+```json
+{
+  "devices": [
+    {
+      "ip": "192.0.2.10",
+      "count": 1,
+      "instances": ["026301"]
+    }
+  ]
+}
+```
+
+`026301` is the device's **EOJ**: `0263` is the class (electric shutter), `01` is the instance number. Send it a command:
+
+```bash
+$ enl set 192.0.2.10 026301 open_close_operation close
+```
+
+```json
+{
+  "ip": "192.0.2.10",
+  "eoj": "026301",
+  "esv": "SetRes",
+  "result": "accepted",
+  "properties": [
+    { "epc": "E0", "name": "open_close_operation" }
+  ]
+}
+```
+
+`"result": "accepted"` comes back, and the physical shutter closes. No cloud, no hub — one UDP frame on the LAN.
+
+These are real outputs from an actual electric shutter. The full walkthrough — including how `describe` introspects what a device can do before you touch it — is written up at [casaviva.dev/posts/echonet-lite-basics](https://casaviva.dev/posts/echonet-lite-basics/).
+
+## Why enl
+
+- **Stateless / one-shot** — open socket → send → collect with timeout → exit. No daemonization, no background process to babysit.
+- **`stdout` is pure structured JSON** — one command, one JSON object, nothing else mixed in. `jq` and LLM function-calling can consume it directly with no scraping. Diagnostics and machine-readable errors are routed to `stderr` instead (`tracing` structured logs + `{"error": {...}}` JSON), keeping the two channels clean.
 - **Never breaks on unknown devices/EPCs** — unknown classes or EPCs are returned losslessly as raw hex and the command still succeeds. The decode dictionary is *additive*, never required.
 
 See [CLAUDE.md](./CLAUDE.md) for the full rationale (why no tokio, why a hand-written codec, etc.).
@@ -45,7 +82,7 @@ task docker:run -- discover
 > Overlapping `enl` one-shots retry the bind themselves (`EADDRINUSE` only, 30 ms interval, up to 2 s), so brief collisions with cron/periodic callers resolve without the caller retrying.
 > Sample IPs use the RFC 5737 documentation range `192.0.2.0/24` — replace them with your real device IPs.
 
-## Usage
+## Quickstart
 
 ```bash
 enl discover                              # find nodes on the LAN
@@ -66,7 +103,11 @@ enl set 192.0.2.10 026301 open_close_operation close             # close the shu
 
 Every binary value always includes `edt_hex`; `value` is added when the decode dictionary knows it, and `name` when the EPC name is known.
 
-## Subcommands & output schemas
+## Reference
+
+Full command reference for using `enl` day to day: every subcommand's flags and output schema, exit codes, dev commands, and source layout.
+
+### Subcommands & output schemas
 
 All subcommands accept the global `-i <IPv4>` / `--iface <IPv4>` flag — your local IPv4 address, used by `discover` to infer a `/24` CIDR when `--cidr` is omitted and by `listen` to pick the multicast join interface.
 
@@ -95,7 +136,7 @@ done
 
 - `schema [discover|get|set|describe|raw|listen]` — print the JSON Schema (draft 2020-12) of a subcommand's stdout output. Omit the target to get every subcommand keyed by name (`{"discover":{...},"get":{...},...}`). Stateless, no network. The output schema is a stable contract, so LLM function-calling / `jq` can fetch it programmatically.
 
-## Exit codes
+### Exit codes
 
 Designed so `cron` / `n8n` can branch on the result.
 
@@ -108,7 +149,7 @@ Designed so `cron` / `n8n` can branch on the result.
 | 5 | network / bind failure |
 | 1 | invalid input detected by enl (`usage`), parse error, or other unexpected error |
 
-## Development
+### Development
 
 ```bash
 task test          # tests, incl. codec round-trips
@@ -118,7 +159,7 @@ task check         # CI equivalent (fmt:check + clippy + test)
 task docker:test   # tests inside Docker (no toolchain needed)
 ```
 
-## Project layout
+### Project layout
 
 - `src/codec.rs` — frame data model + parse/build. Hand-written, zero-dependency. Round-trip tests guard against parse/build asymmetry bugs.
 - `src/properties.rs` — optional decode layer, incl. the property-map parser (two encodings for ≤15 vs ≥16 properties).
@@ -128,13 +169,20 @@ task docker:test   # tests inside Docker (no toolchain needed)
 - `src/error.rs` — machine-readable errors + exit codes.
 - `src/main.rs` — clap CLI.
 
-## Roadmap
+### Roadmap
 
 The core (discover / get / set / describe) is verified against real devices.
 
 - [x] Expanded decode dictionary — `82` spec version, `8A` manufacturer code (major vendors named, unknown ones left as hex), electric shutter `0263`, home AC `0130`. Unknown EPCs still return raw hex.
 - [x] `raw` subcommand — send arbitrary ESV/EPC/EDT, return raw response hex.
 - [x] Output schema stabilization — each subcommand's stdout JSON Schema is published via the `schema` subcommand and machine-fetchable, so LLMs / `jq` can pin to it across versions.
+
+## Learn more
+
+`enl` is the first tool in a small family of protocol-specific CLIs (`enl` / `mat` / `ais` / `mando`) that a `casa` layer orchestrates into one smart home. The story and the reasoning are written up on casaviva:
+
+- [ECHONET Liteとは？家のシャッターを3コマンドで動かす](https://casaviva.dev/posts/echonet-lite-basics/) — this demo, in full: discover → describe → set, and how ECHONET Lite relates to Matter.
+- [自作Rust製ツール5本でスマートホームを一元管理する全体構成](https://casaviva.dev/posts/smart-home-cli-architecture/) — the overall architecture `enl` fits into.
 
 ## License
 
