@@ -47,6 +47,8 @@ $ enl set 192.0.2.10 026301 open_close_operation close
 }
 ```
 
+*Note: The actual output includes additional fields (`pdc`, `edt_hex`, etc.) in each property. Abbreviated here for clarity.*
+
 `"result": "accepted"` comes back, and the physical shutter closes. No cloud, no hub — one UDP frame on the LAN.
 
 These are real outputs from an actual electric shutter. The full walkthrough — including how `describe` introspects what a device can do before you touch it — is written up at [casaviva.dev/posts/echonet-lite-basics](https://casaviva.dev/posts/echonet-lite-basics/).
