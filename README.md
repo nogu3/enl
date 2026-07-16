@@ -115,7 +115,7 @@ All subcommands accept the global `-i <IPv4>` / `--iface <IPv4>` flag — your l
 
 - `discover [--cidr <CIDR>] [--timeout-ms 3000]` — `{"devices":[{"ip","count","instances":[...]}]}`. Sends a unicast CIDR sweep **plus** one multicast probe (multicast is the standard ECHONET Lite discovery method, and lets `discover` run with no arguments). With neither `--cidr` nor `-i`, the sweep is skipped and only multicast is used.
 - `get <ip> <eoj> <epc...> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","properties":[{"epc","name?","pdc","edt_hex","value?"}]}`
-- `set <ip> <eoj> <epc> <edt> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted","properties":[...]}`
+- `set <ip> <eoj> <epc> <edt> [--nowait] [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","result":"accepted"|"sent","properties":[...]}`
 - `describe <ip> <eoj> [--multicast] [--timeout-ms 2000]` — `{"ip","eoj","esv","get_map":[{"epc","name?","values?"}],"set_map":[...],"inf_map":[...]}`. `values` lists the value range of enum-typed EPCs (`{"41":"open","42":"close",...}`); numeric / unsupported EPCs omit it.
 - `raw <ip> <deoj> <esv> [epc[:edt]...] [--seoj 05FF01] [--multicast] [--timeout-ms 2000]` — send an arbitrary ESV/EPC/EDT frame. `{"ip","sent_hex","response_hex","frame?":{...}}`. SNA is returned as `response_hex` rather than an error (a debugging / unsupported-op escape hatch); a `parse_error` is included if the response can't be parsed. EPC/EDT are hex-only here.
 
@@ -125,6 +125,8 @@ All subcommands accept the global `-i <IPv4>` / `--iface <IPv4>` flag — your l
 enl raw 192.0.2.10 013001 62 80          # raw Get 0x80
 enl raw 192.0.2.10 013001 61 80:30       # raw SetC 0x80=ON
 ```
+
+`--nowait` sends SetI (0x60, no response requested) from an ephemeral port and exits 0 as soon as the datagram is sent, without binding port 3610 — so it coexists with a running `listen`. The trade-off: device rejections (SetI_SNA) are undetectable, because devices reply to port 3610 regardless of the request's source port (verified with real devices). `"result":"sent"` means "sent", not "executed" — confirm via the INF that `listen` receives, or a follow-up `get`.
 
 - `listen [--count 1] [--timeout-ms 60000] [--from <ip>] [--eoj <hex>] [--epc <hex>]` — wait for INF/INFC state-change notifications (binds 3610, joins `224.0.23.0`) and exit once `count` events are collected or the timeout elapses (`0` = wait indefinitely). `{"events":[{"ip","tid","seoj","deoj","esv","properties":[...]}]}`. `--eoj` matches the source EOJ: 4 hex digits = class (`0291` = any single-function lighting), 6 = exact instance. Zero events → exit 3 (timeout), one or more → exit 0. INFC is acknowledged with INFC_Res. Still one-shot: it never daemonizes — drive it from an external loop:
 
