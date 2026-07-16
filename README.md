@@ -121,12 +121,12 @@ All subcommands accept the global `-i <IPv4>` / `--iface <IPv4>` flag — your l
 
 `--multicast` sends the frame to `224.0.23.0` instead of `<ip>`, while the response is still expected from `<ip>`. There is no automatic fallback; the flag is always explicit. The multicast egress interface is left to the routing table (a known limitation on multi-homed hosts). Beware with `set`: a multicast Set is processed by **every** device whose EOJ matches the target DEOJ, not just `<ip>` — only the reply from `<ip>` is reported.
 
+`--nowait` sends SetI (0x60, no response requested) from an ephemeral port and exits 0 as soon as the datagram is sent, without binding port 3610 — so it coexists with a running `listen`. The trade-off: device rejections (SetI_SNA) are undetectable, because devices reply to port 3610 regardless of the request's source port (verified with real devices). `"result":"sent"` means "sent", not "executed" — confirm via the INF that `listen` receives, or a follow-up `get`.
+
 ```bash
 enl raw 192.0.2.10 013001 62 80          # raw Get 0x80
 enl raw 192.0.2.10 013001 61 80:30       # raw SetC 0x80=ON
 ```
-
-`--nowait` sends SetI (0x60, no response requested) from an ephemeral port and exits 0 as soon as the datagram is sent, without binding port 3610 — so it coexists with a running `listen`. The trade-off: device rejections (SetI_SNA) are undetectable, because devices reply to port 3610 regardless of the request's source port (verified with real devices). `"result":"sent"` means "sent", not "executed" — confirm via the INF that `listen` receives, or a follow-up `get`.
 
 - `listen [--count 1] [--timeout-ms 60000] [--from <ip>] [--eoj <hex>] [--epc <hex>]` — wait for INF/INFC state-change notifications (binds 3610, joins `224.0.23.0`) and exit once `count` events are collected or the timeout elapses (`0` = wait indefinitely). `{"events":[{"ip","tid","seoj","deoj","esv","properties":[...]}]}`. `--eoj` matches the source EOJ: 4 hex digits = class (`0291` = any single-function lighting), 6 = exact instance. Zero events → exit 3 (timeout), one or more → exit 0. INFC is acknowledged with INFC_Res. Still one-shot: it never daemonizes — drive it from an external loop:
 
