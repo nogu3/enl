@@ -80,6 +80,12 @@ enum Command {
         /// 応答しない機器向け。応答は ip から受ける。
         #[arg(long)]
         multicast: bool,
+        /// SetI (0x60, 応答不要) で送信し応答を待たない。エフェメラルポート
+        /// から送るため listen の 3610 専有と共存できる。機器リジェクト
+        /// (SetI_SNA) は検知不能で、exit 0 は送信成功のみを意味する。
+        /// --timeout-ms は使われない。
+        #[arg(long)]
+        nowait: bool,
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
@@ -193,19 +199,24 @@ fn run(cli: Cli) -> Result<serde_json::Value, AppError> {
             epc,
             edt,
             multicast,
+            nowait,
             timeout_ms,
         } => {
             let eoj = parse_eoj(&eoj)?;
             let epc = resolve_epc(eoj, &epc)?;
             let edt = resolve_edt(eoj, epc, &edt)?;
-            commands::set(
-                ip,
-                eoj,
-                epc,
-                edt,
-                Duration::from_millis(timeout_ms),
-                multicast,
-            )
+            if nowait {
+                commands::set_nowait(ip, eoj, epc, edt, multicast)
+            } else {
+                commands::set(
+                    ip,
+                    eoj,
+                    epc,
+                    edt,
+                    Duration::from_millis(timeout_ms),
+                    multicast,
+                )
+            }
         }
         Command::Describe {
             ip,
