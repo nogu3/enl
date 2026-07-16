@@ -1,13 +1,17 @@
 //! UDP ソケット層。ステートレス / one-shot。
 //!
 //! 最重要: 仕様準拠機器は応答を送信元ポートでなく 3610 に返す。
-//! よって送受信ソケットを 0.0.0.0:3610 にバインドして専有する。
+//! one-shot は 0.0.0.0:3610 に SO_REUSEADDR 付きで bind し、one-shot 同士は
+//! flock で直列化する。listen は 224.0.23.0:3610 (multicast グループアドレス)
+//! に bind するため 0.0.0.0:3610 が空き、one-shot と共存できる (実機検証
+//! 2026-07-16)。REUSEADDR を立てない外部プロセス (HA 等) の専有は従来どおり
+//! EADDRINUSE リトライの末に exit 5。
 //!
 //! discover は CIDR sweep (各ホストへ unicast Get) と multicast (224.0.23.0) の
 //! 常時併用。multicast は ECHONET Lite 標準の探索方式で、CIDR 不明でも引数なしで
 //! 探索できる。multicast の egress インタフェースは制御しない
-//! (ルーティングテーブル任せ)。制御には socket2 等の依存追加が要るため、
-//! 依存ゼロ方針を優先した既知の制約 (実需が出たら -i 連動で追加する)。
+//! (ルーティングテーブル任せ)。socket2 は導入済みだが egress 制御は実需が
+//! 出るまで足さない (実需が出たら -i 連動で追加する)。
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
