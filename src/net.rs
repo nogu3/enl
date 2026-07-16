@@ -16,6 +16,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use socket2::{Domain, Protocol, Socket, Type};
+
 use crate::error::{AppError, ErrKind};
 
 pub const ECHONET_PORT: u16 = 3610;
@@ -148,6 +150,16 @@ pub fn open_ephemeral_socket() -> Result<UdpSocket, AppError> {
         .map_err(|e| AppError::new(ErrKind::Bind, format!("{addr} へのバインド失敗: {e}")))
 }
 
+/// SO_REUSEADDR 付きで UDP ソケットを bind する。listen (224.0.23.0:3610) と
+/// one-shot (0.0.0.0:3610) の共存には双方の REUSEADDR が必要 (実機検証
+/// 2026-07-16)。socket2 はこの 1 点のためだけに使う。
+fn bind_reuse(addr: SocketAddrV4) -> io::Result<UdpSocket> {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&SocketAddr::V4(addr).into())?;
+    Ok(socket.into())
+}
+
 /// addr への bind を AddrInUse に限り interval 間隔で window までリトライする。
 /// one-shot 同士の瞬間衝突 (数十 ms) を吸収するのが目的で、AddrInUse 以外の
 /// エラー (権限・アドレス不在等) はリトライしても直らないため即失敗させる。
@@ -159,7 +171,7 @@ fn bind_with_retry(
     let deadline = Instant::now() + window;
     let mut waited = false;
     loop {
-        match UdpSocket::bind(addr) {
+        match bind_reuse(addr) {
             Ok(s) => {
                 if waited {
                     tracing::info!(%addr, "解放を確認、バインド成功");
@@ -417,6 +429,25 @@ mod tests {
         let port = s.local_addr().unwrap().port();
         assert_ne!(port, 0);
         assert_ne!(port, ECHONET_PORT);
+    }
+
+    #[test]
+    fn bind_reuse_allows_group_and_wildcard_coexistence() {
+        // 共存の核: REUSEADDR 同士なら 224.0.23.0:P と 0.0.0.0:P を同時に bind できる
+        const PORT: u16 = 23611;
+        let group = bind_reuse(SocketAddrV4::new(MULTICAST_ADDR, PORT)).unwrap();
+        let wildcard = bind_reuse(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT)).unwrap();
+        assert_eq!(group.local_addr().unwrap().port(), PORT);
+        assert_eq!(wildcard.local_addr().unwrap().port(), PORT);
+    }
+
+    #[test]
+    fn bind_reuse_still_conflicts_with_plain_bind() {
+        // REUSEADDR は双方に必要: 相手 (HA・旧 enl 相当) が plain bind なら従来どおり AddrInUse
+        const PORT: u16 = 23612;
+        let _holder = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT)).unwrap();
+        let err = bind_reuse(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 
     /// テスト用ロックファイルパス (テスト間・プロセス間で衝突しないように)。
