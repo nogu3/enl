@@ -290,7 +290,6 @@ pub fn set(
 /// 3610 専有と共存できる。機器の応答は 3610 固定宛てに返る (実機検証 2026-07-16)
 /// ため応答は待たず、機器リジェクト (SetI_SNA) も検知できない。exit 0 は
 /// 「送信できた」ことしか意味しない。実行確認は listen の INF か後続 get に委ねる。
-#[allow(dead_code)] // Task 3 で CLI に wired in される
 pub fn set_nowait(
     ip: IpAddr,
     eoj: Eoj,
