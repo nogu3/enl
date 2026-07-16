@@ -897,7 +897,8 @@ mod tests {
         assert_eq!(out["properties"][0]["edt_hex"], "30");
 
         // set_nowait は既に return 済み = 応答を待っていない。フレーム内容を検証。
-        dev.set_read_timeout(Some(Duration::from_millis(2000))).unwrap();
+        dev.set_read_timeout(Some(Duration::from_millis(2000)))
+            .unwrap();
         let mut buf = [0u8; 1500];
         let (n, from) = dev.recv_from(&mut buf).unwrap();
         // EDATA: ESV=0x60 (SetI), OPC=1, EPC=0x80, PDC=1, EDT=0x30
@@ -917,12 +918,14 @@ mod tests {
 
         // INF (応答不要) には何も返さない
         reply_infc_res("127.0.0.1".parse().unwrap(), &inf_frame(Esv::Inf));
-        dev.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        dev.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
         assert!(dev.recv_from(&mut buf).is_err());
 
         // INFC には INFC_Res が返る
         reply_infc_res("127.0.0.1".parse().unwrap(), &inf_frame(Esv::InfC));
-        dev.set_read_timeout(Some(Duration::from_millis(2000))).unwrap();
+        dev.set_read_timeout(Some(Duration::from_millis(2000)))
+            .unwrap();
         let (n, from) = dev.recv_from(&mut buf).unwrap();
         // EDATA: ESV=0x7A (INFC_Res), OPC=1, EPC=0x80, PDC=0
         assert_eq!(&buf[10..n], &[0x7A, 0x01, 0x80, 0x00]);

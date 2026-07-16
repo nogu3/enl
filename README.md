@@ -81,7 +81,7 @@ task docker:run -- discover
 ```
 
 > ⚠️ If an ECHONET integration (Home Assistant, etc.) holds port 3610, it will steal the responses. Stop it while testing.
-> `enl` processes coexist with each other (v1.5.0): `listen` binds the multicast group address `224.0.23.0:3610` instead of the wildcard, one-shots bind `0.0.0.0:3610` with `SO_REUSEADDR`, and overlapping one-shots are serialized with a lock file (`$XDG_RUNTIME_DIR/enl-3610.lock`, falling back to `/tmp`; 30 ms interval, up to 2 s). Non-`enl` holders of 3610 still cause exit 5 after the `EADDRINUSE` retry window.
+> `enl` processes coexist with each other (v1.5.0): `listen` binds the multicast group address `224.0.23.0:3610` instead of the wildcard, one-shots bind `0.0.0.0:3610` with `SO_REUSEADDR`, and overlapping one-shots are serialized with a lock file (`/tmp/enl-3610.lock` (a fixed host-global path, so cron jobs, services, and interactive shells share the same lock); 30 ms interval, up to 2 s). Non-`enl` holders of 3610 still cause exit 5 after the `EADDRINUSE` retry window.
 > Sample IPs use the RFC 5737 documentation range `192.0.2.0/24` — replace them with your real device IPs.
 
 ## Quickstart

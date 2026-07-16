@@ -48,6 +48,9 @@ const BIND_RETRY_WINDOW: Duration = Duration::from_millis(2000);
 /// one-shot 同士を直列化する。Deref<Target = UdpSocket> なので呼び出し側は
 /// 通常の &UdpSocket として使える。
 pub struct ExclusiveSocket {
+    // フィールド順序が重要: Rust は宣言順に drop するため socket が閉じてから
+    // _lock が解放される。逆順にするとロック解放後も旧ソケットが残り
+    // unicast 横取りの窓が開く。
     socket: UdpSocket,
     _lock: File,
 }
@@ -75,12 +78,18 @@ pub fn open_socket() -> Result<ExclusiveSocket, AppError> {
 /// one-shot 排他ロックのファイルパス。SO_REUSEADDR 導入後は one-shot 同士の
 /// EADDRINUSE 排他が働かない (wildcard の二重バインドが通り後着が unicast を
 /// 横取りする、実機検証 2026-07-16) ため、flock で直列化する。
-/// XDG_RUNTIME_DIR (per-user, systemd Linux 標準) を優先し、無ければ /tmp。
+/// 守る対象 (0.0.0.0:3610) はホストグローバルなので、ロックパスも
+/// ホストグローバルな固定パスでなければならない。XDG_RUNTIME_DIR は
+/// per-user かつ環境依存 (対話セッションでは設定され、cron や systemd
+/// service では通常未設定) であり、これを使うと「cron 実行の one-shot と
+/// 手動実行の one-shot」— 直列化が守りたい本来のペア — が別々のロック
+/// ファイルを掴んでしまい直列化が破れる。そのため無条件に /tmp 固定とする。
+/// 既知の限界: /tmp のロックファイルは保持中でも tmp cleaner 等に削除され
+/// うる。削除されると次の one-shot が新しい inode をロックし併走しうるが、
+/// 保持は最長でも BIND_RETRY_WINDOW 相当 (~2 秒) かつ open のたびに
+/// 作り直されるため実害は無視できる。
 fn lock_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("enl-3610.lock")
+    std::env::temp_dir().join("enl-3610.lock")
 }
 
 /// path の flock を bind リトライと同じセマンティクス (interval 間隔・window
@@ -478,8 +487,8 @@ mod tests {
         let _holder =
             acquire_lock(&path, Duration::from_millis(50), Duration::from_millis(10)).unwrap();
         let start = Instant::now();
-        let err = acquire_lock(&path, Duration::from_millis(120), Duration::from_millis(10))
-            .unwrap_err();
+        let err =
+            acquire_lock(&path, Duration::from_millis(120), Duration::from_millis(10)).unwrap_err();
         assert_eq!(err.kind, crate::error::ErrKind::Bind);
         assert!(err.detail.contains("ロック"), "detail={}", err.detail);
         // 窓いっぱいまでは粘る
@@ -506,15 +515,19 @@ mod tests {
             .unwrap()
             .expect("multicast 未達");
         assert_eq!(dg.data, b"MCAST");
-        assert!(recv_one(&group, Some(Instant::now() + Duration::from_millis(300)))
-            .unwrap()
-            .is_none());
+        assert!(
+            recv_one(&group, Some(Instant::now() + Duration::from_millis(300)))
+                .unwrap()
+                .is_none()
+        );
 
         // wildcard ソケット: unicast が届く (multicast も IP_MULTICAST_ALL で
         // 届きうるため、目当ての UNI が来るまで読み飛ばす)
         let deadline = Instant::now() + Duration::from_millis(2000);
         loop {
-            let dg = recv_one(&wildcard, Some(deadline)).unwrap().expect("unicast 未達");
+            let dg = recv_one(&wildcard, Some(deadline))
+                .unwrap()
+                .expect("unicast 未達");
             if dg.data == b"UNI" {
                 break;
             }
@@ -531,8 +544,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             drop(holder);
         });
-        let _lock =
-            acquire_lock(&path, Duration::from_millis(2000), Duration::from_millis(10)).unwrap();
+        let _lock = acquire_lock(
+            &path,
+            Duration::from_millis(2000),
+            Duration::from_millis(10),
+        )
+        .unwrap();
         t.join().unwrap();
     }
 }
