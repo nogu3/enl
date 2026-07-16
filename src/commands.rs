@@ -451,7 +451,9 @@ impl ListenFilter {
 
 /// INF / INFC 通知を待ち受けて収集する (one-shot: count 件か deadline で終了)。
 ///
-/// 3610 を bind し 224.0.23.0 に join して INF (0x73) / INFC (0x74) のみ採用する。
+/// 224.0.23.0:3610 (multicast グループアドレス) に bind して INF (0x73) /
+/// INFC (0x74) のみ採用する。0.0.0.0:3610 は使わないため one-shot の get/set と
+/// 共存できる。unicast 宛ての通知は受けられない (既知のトレードオフ)。
 /// INFC には仕様上の応答 (INFC_Res) を best-effort で返す。
 /// deadline までに 1 件も来なければ timeout (exit 3)、1 件以上あれば成功。
 pub fn listen(
@@ -460,8 +462,7 @@ pub fn listen(
     timeout: Option<Duration>,
     filter: ListenFilter,
 ) -> Result<Value, AppError> {
-    let socket = net::open_socket()?;
-    net::join_multicast(&socket, iface)?;
+    let socket = net::open_listen_socket(iface)?;
     let deadline = timeout.map(|t| Instant::now() + t);
     tracing::info!(
         count,
@@ -485,7 +486,7 @@ pub fn listen(
         match inf_event(dg.from.ip(), &frame, &filter) {
             Some(event) => {
                 tracing::info!(from = %dg.from, "INF 受信");
-                reply_infc_res(&socket, dg.from.ip(), &frame);
+                reply_infc_res(dg.from.ip(), &frame);
                 events.push(event);
             }
             None => {
@@ -533,7 +534,10 @@ fn inf_event(src: IpAddr, frame: &Frame, filter: &ListenFilter) -> Option<Value>
 }
 
 /// INFC (0x74) は応答必須なので INFC_Res を返す。失敗しても収集は止めない。
-fn reply_infc_res(socket: &std::net::UdpSocket, src: IpAddr, frame: &Frame) {
+/// listen ソケットは 224.0.23.0 に bind されており unicast 送信の送信元に
+/// 使えない (送信元アドレスがグループアドレスになる) ため、エフェメラル
+/// ソケットから送る。
+fn reply_infc_res(src: IpAddr, frame: &Frame) {
     let (seoj, esv, props) = match &frame.edata {
         Edata::Standard {
             seoj, esv, props, ..
@@ -543,6 +547,13 @@ fn reply_infc_res(socket: &std::net::UdpSocket, src: IpAddr, frame: &Frame) {
     if esv != Esv::InfC {
         return;
     }
+    let socket = match net::open_ephemeral_socket() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(%src, error = %e, "INFC_Res 用ソケット確保失敗 (continue)");
+            return;
+        }
+    };
     let res = Frame::standard(
         frame.tid,
         CONTROLLER,
@@ -656,6 +667,10 @@ fn standard_or_reject(frame: &Frame, eoj: Eoj) -> Result<(Esv, Vec<Property>), A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// 127.0.0.1:3610 を bind するテストの直列化 (cargo test は並列実行のため)。
+    static PORT_3610: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dst_for_unicast_and_multicast() {
@@ -868,6 +883,7 @@ mod tests {
     fn set_nowait_sends_seti_from_ephemeral_and_returns_sent() {
         use std::net::UdpSocket;
         use std::time::Duration;
+        let _guard = PORT_3610.lock().unwrap();
         // 127.0.0.1:3610 で機器役として受ける。ローカルで 3610 が使用中
         // (enl listen 等) だとこのテストは bind に失敗する。
         let dev = UdpSocket::bind("127.0.0.1:3610").expect("127.0.0.1:3610 が使用中");
@@ -887,6 +903,30 @@ mod tests {
         // EDATA: ESV=0x60 (SetI), OPC=1, EPC=0x80, PDC=1, EDT=0x30
         assert_eq!(&buf[10..n], &[0x60, 0x01, 0x80, 0x01, 0x30]);
         // 送信元がエフェメラルポート (3610 ではない) であること
+        assert_ne!(from.port(), 3610);
+    }
+
+    #[test]
+    fn reply_infc_res_replies_from_ephemeral_port() {
+        use std::net::UdpSocket;
+        use std::time::Duration;
+        let _guard = PORT_3610.lock().unwrap();
+        // 機器役: INFC の送信元として INFC_Res を 3610 で受ける。
+        let dev = UdpSocket::bind("127.0.0.1:3610").expect("127.0.0.1:3610 が使用中");
+        let mut buf = [0u8; 1500];
+
+        // INF (応答不要) には何も返さない
+        reply_infc_res("127.0.0.1".parse().unwrap(), &inf_frame(Esv::Inf));
+        dev.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert!(dev.recv_from(&mut buf).is_err());
+
+        // INFC には INFC_Res が返る
+        reply_infc_res("127.0.0.1".parse().unwrap(), &inf_frame(Esv::InfC));
+        dev.set_read_timeout(Some(Duration::from_millis(2000))).unwrap();
+        let (n, from) = dev.recv_from(&mut buf).unwrap();
+        // EDATA: ESV=0x7A (INFC_Res), OPC=1, EPC=0x80, PDC=0
+        assert_eq!(&buf[10..n], &[0x7A, 0x01, 0x80, 0x00]);
+        // listen ソケット (グループアドレス) ではなくエフェメラルポートから送られる
         assert_ne!(from.port(), 3610);
     }
 }
