@@ -42,6 +42,18 @@ pub fn open_socket() -> Result<UdpSocket, AppError> {
     bind_with_retry(bind_addr, BIND_RETRY_WINDOW, BIND_RETRY_INTERVAL)
 }
 
+/// 送信専用のエフェメラルポートソケットを開く (set --nowait 用)。
+/// 3610 を専有しないため listen と共存できる。実機検証 (2026-07-16) で
+/// 機器の応答は要求の送信元ポートでなく常に 3610 固定宛てに返ることを
+/// 確認済みのため、このソケットで応答は受信できない (受信しない前提で使う)。
+/// エフェメラルは AddrInUse が起き得ないためリトライしない。
+#[allow(dead_code)]
+pub fn open_ephemeral_socket() -> Result<UdpSocket, AppError> {
+    let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
+    UdpSocket::bind(addr)
+        .map_err(|e| AppError::new(ErrKind::Bind, format!("{addr} へのバインド失敗: {e}")))
+}
+
 /// addr への bind を AddrInUse に限り interval 間隔で window までリトライする。
 /// one-shot 同士の瞬間衝突 (数十 ms) を吸収するのが目的で、AddrInUse 以外の
 /// エラー (権限・アドレス不在等) はリトライしても直らないため即失敗させる。
@@ -303,5 +315,13 @@ mod tests {
         assert_eq!(err.kind, crate::error::ErrKind::Bind);
         assert!(!err.detail.contains("解放されず"), "detail={}", err.detail);
         assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn ephemeral_socket_binds_off_3610() {
+        let s = open_ephemeral_socket().unwrap();
+        let port = s.local_addr().unwrap().port();
+        assert_ne!(port, 0);
+        assert_ne!(port, ECHONET_PORT);
     }
 }
