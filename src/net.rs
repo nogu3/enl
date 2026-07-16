@@ -209,9 +209,22 @@ fn bind_with_retry(
     }
 }
 
+/// listen 用ソケットを開く。wildcard ではなく 224.0.23.0:3610 (multicast
+/// グループアドレスそのもの) に bind するため multicast (INF) のみ受信し、
+/// 0.0.0.0:3610 が空いて one-shot と共存できる。トレードオフ: unicast 宛ての
+/// INF/INFC は受けられない (状変アナウンスは multicast なので実害はほぼ無い)。
+/// グループアドレスへの bind は Linux 前提。REUSEADDR 同士なので複数 listen も
+/// 共存でき、各々に multicast が届く。
+pub fn open_listen_socket(iface: Option<Ipv4Addr>) -> Result<UdpSocket, AppError> {
+    let addr = SocketAddrV4::new(MULTICAST_ADDR, ECHONET_PORT);
+    let socket = bind_with_retry(addr, BIND_RETRY_WINDOW, BIND_RETRY_INTERVAL)?;
+    join_multicast(&socket, iface)?;
+    Ok(socket)
+}
+
 /// INF 通知の待受用に 224.0.23.0 へ join する。
 /// iface 省略時は OS 既定のインタフェースで join する。
-pub fn join_multicast(socket: &UdpSocket, iface: Option<Ipv4Addr>) -> Result<(), AppError> {
+fn join_multicast(socket: &UdpSocket, iface: Option<Ipv4Addr>) -> Result<(), AppError> {
     let iface = iface.unwrap_or(Ipv4Addr::UNSPECIFIED);
     socket
         .join_multicast_v4(&MULTICAST_ADDR, &iface)
@@ -467,6 +480,41 @@ mod tests {
         assert!(err.detail.contains("ロック"), "detail={}", err.detail);
         // 窓いっぱいまでは粘る
         assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn group_bound_socket_receives_multicast_and_ignores_unicast() {
+        const PORT: u16 = 23613;
+        let group = bind_reuse(SocketAddrV4::new(MULTICAST_ADDR, PORT)).unwrap();
+        join_multicast(&group, Some(Ipv4Addr::LOCALHOST)).unwrap();
+        let wildcard = bind_reuse(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, PORT)).unwrap();
+
+        // 送信側: lo 経由の multicast → 自ホストへループバックさせる
+        let sender = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        sender.set_multicast_if_v4(&Ipv4Addr::LOCALHOST).unwrap();
+        sender.set_multicast_loop_v4(true).unwrap();
+        let sender: UdpSocket = sender.into();
+        sender.send_to(b"MCAST", (MULTICAST_ADDR, PORT)).unwrap();
+        sender.send_to(b"UNI", (Ipv4Addr::LOCALHOST, PORT)).unwrap();
+
+        // group ソケット: multicast は受かり、unicast は届かない
+        let dg = recv_one(&group, Some(Instant::now() + Duration::from_millis(2000)))
+            .unwrap()
+            .expect("multicast 未達");
+        assert_eq!(dg.data, b"MCAST");
+        assert!(recv_one(&group, Some(Instant::now() + Duration::from_millis(300)))
+            .unwrap()
+            .is_none());
+
+        // wildcard ソケット: unicast が届く (multicast も IP_MULTICAST_ALL で
+        // 届きうるため、目当ての UNI が来るまで読み飛ばす)
+        let deadline = Instant::now() + Duration::from_millis(2000);
+        loop {
+            let dg = recv_one(&wildcard, Some(deadline)).unwrap().expect("unicast 未達");
+            if dg.data == b"UNI" {
+                break;
+            }
+        }
     }
 
     #[test]
