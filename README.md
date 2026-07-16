@@ -81,7 +81,7 @@ task docker:run -- discover
 ```
 
 > ⚠️ If an ECHONET integration (Home Assistant, etc.) holds port 3610, it will steal the responses. Stop it while testing.
-> Overlapping `enl` one-shots retry the bind themselves (`EADDRINUSE` only, 30 ms interval, up to 2 s), so brief collisions with cron/periodic callers resolve without the caller retrying.
+> `enl` processes coexist with each other (v1.5.0): `listen` binds the multicast group address `224.0.23.0:3610` instead of the wildcard, one-shots bind `0.0.0.0:3610` with `SO_REUSEADDR`, and overlapping one-shots are serialized with a lock file (`$XDG_RUNTIME_DIR/enl-3610.lock`, falling back to `/tmp`; 30 ms interval, up to 2 s). Non-`enl` holders of 3610 still cause exit 5 after the `EADDRINUSE` retry window.
 > Sample IPs use the RFC 5737 documentation range `192.0.2.0/24` — replace them with your real device IPs.
 
 ## Quickstart
@@ -121,14 +121,14 @@ All subcommands accept the global `-i <IPv4>` / `--iface <IPv4>` flag — your l
 
 `--multicast` sends the frame to `224.0.23.0` instead of `<ip>`, while the response is still expected from `<ip>`. There is no automatic fallback; the flag is always explicit. The multicast egress interface is left to the routing table (a known limitation on multi-homed hosts). Beware with `set`: a multicast Set is processed by **every** device whose EOJ matches the target DEOJ, not just `<ip>` — only the reply from `<ip>` is reported.
 
-`--nowait` sends SetI (0x60, no response requested) from an ephemeral port and exits 0 as soon as the datagram is sent, without binding port 3610 — so it coexists with a running `listen`. The trade-off: device rejections (SetI_SNA) are undetectable, because devices reply to port 3610 regardless of the request's source port (verified with real devices). `"result":"sent"` means "sent", not "executed" — confirm via the INF that `listen` receives, or a follow-up `get`.
+`--nowait` sends SetI (0x60, no response requested) from an ephemeral port and exits 0 as soon as the datagram is sent, without binding port 3610 or taking the one-shot lock. Since v1.5.0 a plain `set` also coexists with a running `listen`, so `--nowait` is now just the fastest fire-and-forget path. The trade-off: device rejections (SetI_SNA) are undetectable, because devices reply to port 3610 regardless of the request's source port (verified with real devices). `"result":"sent"` means "sent", not "executed" — confirm via the INF that `listen` receives, or a follow-up `get`.
 
 ```bash
 enl raw 192.0.2.10 013001 62 80          # raw Get 0x80
 enl raw 192.0.2.10 013001 61 80:30       # raw SetC 0x80=ON
 ```
 
-- `listen [--count 1] [--timeout-ms 60000] [--from <ip>] [--eoj <hex>] [--epc <hex>]` — wait for INF/INFC state-change notifications (binds 3610, joins `224.0.23.0`) and exit once `count` events are collected or the timeout elapses (`0` = wait indefinitely). `{"events":[{"ip","tid","seoj","deoj","esv","properties":[...]}]}`. `--eoj` matches the source EOJ: 4 hex digits = class (`0291` = any single-function lighting), 6 = exact instance. Zero events → exit 3 (timeout), one or more → exit 0. INFC is acknowledged with INFC_Res. Still one-shot: it never daemonizes — drive it from an external loop:
+- `listen [--count 1] [--timeout-ms 60000] [--from <ip>] [--eoj <hex>] [--epc <hex>]` — wait for INF/INFC state-change notifications (binds the multicast group address `224.0.23.0:3610` — the wildcard `0.0.0.0:3610` stays free, so `get`/`set` run concurrently) and exit once `count` events are collected or the timeout elapses (`0` = wait indefinitely). `{"events":[{"ip","tid","seoj","deoj","esv","properties":[...]}]}`. `--eoj` matches the source EOJ: 4 hex digits = class (`0291` = any single-function lighting), 6 = exact instance. Zero events → exit 3 (timeout), one or more → exit 0. INFC is acknowledged with INFC_Res. Still one-shot: it never daemonizes — drive it from an external loop:
 
 ```bash
 # when any lighting announces a state change, turn on another light
@@ -137,6 +137,8 @@ while ev=$(enl listen --eoj 0291 --epc 80 --timeout-ms 0); do
     && enl set 192.0.2.11 029101 power on
 done
 ```
+
+Because the socket is bound to the group address, unicast-addressed INF/INFC cannot be received (state-change announcements are multicast, so this rarely matters); binding a multicast address is Linux-specific. Multiple concurrent `listen` processes each receive a copy of every notification.
 
 - `schema [discover|get|set|describe|raw|listen]` — print the JSON Schema (draft 2020-12) of a subcommand's stdout output. Omit the target to get every subcommand keyed by name (`{"discover":{...},"get":{...},...}`). Stateless, no network. The output schema is a stable contract, so LLM function-calling / `jq` can fetch it programmatically.
 
@@ -167,7 +169,7 @@ task docker:test   # tests inside Docker (no toolchain needed)
 
 - `src/codec.rs` — frame data model + parse/build. Hand-written, zero-dependency. Round-trip tests guard against parse/build asymmetry bugs.
 - `src/properties.rs` — optional decode layer, incl. the property-map parser (two encodings for ≤15 vs ≥16 properties).
-- `src/net.rs` — UDP socket layer (owns `0.0.0.0:3610`; retries `EADDRINUSE` binds for up to 2 s to absorb overlapping one-shots). `discover` is a CIDR sweep plus a multicast probe (the standard ECHONET Lite discovery method); `listen` joins the `224.0.23.0` multicast group.
+- `src/net.rs` — UDP socket layer. One-shots own `0.0.0.0:3610` with `SO_REUSEADDR` (serialized among themselves via flock, `EADDRINUSE` binds retried for up to 2 s against non-`enl` holders); `listen` binds the multicast group address `224.0.23.0:3610` so both coexist. `discover` is a CIDR sweep plus a multicast probe (the standard ECHONET Lite discovery method).
 - `src/commands.rs` — discover / get / set / describe / raw / listen.
 - `src/schema.rs` — JSON Schema of each subcommand's stdout output (the `schema` subcommand).
 - `src/error.rs` — machine-readable errors + exit codes.
