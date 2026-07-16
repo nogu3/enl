@@ -9,8 +9,11 @@
 //! (ルーティングテーブル任せ)。制御には socket2 等の依存追加が要るため、
 //! 依存ゼロ方針を優先した既知の制約 (実需が出たら -i 連動で追加する)。
 
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, ErrKind};
@@ -35,11 +38,103 @@ pub fn is_reply_candidate(data: &[u8], tid: u16) -> bool {
 const BIND_RETRY_INTERVAL: Duration = Duration::from_millis(30);
 const BIND_RETRY_WINDOW: Duration = Duration::from_millis(2000);
 
-/// 3610 を専有する UDP ソケットを開く。AddrInUse は BIND_RETRY_WINDOW まで
-/// リトライし、それ以外のバインド失敗は即 bind エラー (exit 5)。
-pub fn open_socket() -> Result<UdpSocket, AppError> {
+/// one-shot 用の 3610 ソケット。flock (_lock) をソケットと同寿命で保持し、
+/// one-shot 同士を直列化する。Deref<Target = UdpSocket> なので呼び出し側は
+/// 通常の &UdpSocket として使える。
+pub struct ExclusiveSocket {
+    socket: UdpSocket,
+    _lock: File,
+}
+
+impl Deref for ExclusiveSocket {
+    type Target = UdpSocket;
+    fn deref(&self) -> &UdpSocket {
+        &self.socket
+    }
+}
+
+/// 3610 を専有する one-shot 用ソケットを開く。flock で one-shot 同士を
+/// 直列化した上で 0.0.0.0:3610 に bind する。AddrInUse は BIND_RETRY_WINDOW
+/// までリトライし、それ以外のバインド失敗は即 bind エラー (exit 5)。
+pub fn open_socket() -> Result<ExclusiveSocket, AppError> {
+    let lock = acquire_lock(&lock_path(), BIND_RETRY_WINDOW, BIND_RETRY_INTERVAL)?;
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, ECHONET_PORT);
-    bind_with_retry(bind_addr, BIND_RETRY_WINDOW, BIND_RETRY_INTERVAL)
+    let socket = bind_with_retry(bind_addr, BIND_RETRY_WINDOW, BIND_RETRY_INTERVAL)?;
+    Ok(ExclusiveSocket {
+        socket,
+        _lock: lock,
+    })
+}
+
+/// one-shot 排他ロックのファイルパス。SO_REUSEADDR 導入後は one-shot 同士の
+/// EADDRINUSE 排他が働かない (wildcard の二重バインドが通り後着が unicast を
+/// 横取りする、実機検証 2026-07-16) ため、flock で直列化する。
+/// XDG_RUNTIME_DIR (per-user, systemd Linux 標準) を優先し、無ければ /tmp。
+fn lock_path() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("enl-3610.lock")
+}
+
+/// path の flock を bind リトライと同じセマンティクス (interval 間隔・window
+/// まで) で取得する。取れなければ bind エラー (exit 5)。
+fn acquire_lock(path: &Path, window: Duration, interval: Duration) -> Result<File, AppError> {
+    // /tmp フォールバック時、他ユーザーが作ったファイルは書込 open できない
+    // ことがあるため読取専用 open にフォールバックする (flock は読取 fd でも取れる)。
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .or_else(|_| File::open(path))
+        .map_err(|e| {
+            AppError::new(
+                ErrKind::Bind,
+                format!("ロックファイル {} を開けない: {e}", path.display()),
+            )
+        })?;
+    let deadline = Instant::now() + window;
+    let mut waited = false;
+    loop {
+        match file.try_lock() {
+            Ok(()) => {
+                if waited {
+                    tracing::info!(path = %path.display(), "ロック解放を確認、取得成功");
+                }
+                return Ok(file);
+            }
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(AppError::new(
+                        ErrKind::Bind,
+                        format!(
+                            "one-shot ロック {} を取得できず ({}ms 再試行)。他の enl one-shot が長時間専有していないか確認",
+                            path.display(),
+                            window.as_millis()
+                        ),
+                    ));
+                }
+                if !waited {
+                    // 対話利用時に無言で待たないよう、待ち始めに 1 回だけ知らせる
+                    tracing::info!(
+                        path = %path.display(),
+                        "他の one-shot がロック保持中。最大 {}ms 解放を待つ",
+                        window.as_millis()
+                    );
+                    waited = true;
+                }
+                std::thread::sleep(interval);
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(AppError::new(
+                    ErrKind::Bind,
+                    format!("ロック {} の取得失敗: {e}", path.display()),
+                ));
+            }
+        }
+    }
 }
 
 /// 送信専用のエフェメラルポートソケットを開く (set --nowait 用)。
@@ -322,5 +417,39 @@ mod tests {
         let port = s.local_addr().unwrap().port();
         assert_ne!(port, 0);
         assert_ne!(port, ECHONET_PORT);
+    }
+
+    /// テスト用ロックファイルパス (テスト間・プロセス間で衝突しないように)。
+    fn test_lock_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("enl-test-{}-{}.lock", name, std::process::id()))
+    }
+
+    #[test]
+    fn lock_times_out_while_held() {
+        let path = test_lock_path("held");
+        let _holder =
+            acquire_lock(&path, Duration::from_millis(50), Duration::from_millis(10)).unwrap();
+        let start = Instant::now();
+        let err = acquire_lock(&path, Duration::from_millis(120), Duration::from_millis(10))
+            .unwrap_err();
+        assert_eq!(err.kind, crate::error::ErrKind::Bind);
+        assert!(err.detail.contains("ロック"), "detail={}", err.detail);
+        // 窓いっぱいまでは粘る
+        assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn lock_acquired_after_release() {
+        let path = test_lock_path("release");
+        let holder =
+            acquire_lock(&path, Duration::from_millis(50), Duration::from_millis(10)).unwrap();
+        // 100ms 後に holder が解放する = 他の one-shot が終わる状況
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(holder);
+        });
+        let _lock =
+            acquire_lock(&path, Duration::from_millis(2000), Duration::from_millis(10)).unwrap();
+        t.join().unwrap();
     }
 }
