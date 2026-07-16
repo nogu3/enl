@@ -67,7 +67,7 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         timeout_ms: u64,
     },
-    /// 指定機器のプロパティを設定 (SetC)。
+    /// 指定機器のプロパティを設定 (SetC / --nowait で SetI)。
     Set {
         ip: IpAddr,
         /// 対象 EOJ (6 hex 桁)。

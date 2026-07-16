@@ -300,9 +300,10 @@ pub fn set_nowait(
     tracing::info!(%ip, eoj = eoj.to_hex(), epc = format!("{epc:02X}"), transport = transport_name(multicast), "set (SetI, nowait) 送信");
 
     let props = vec![Property::new(epc, edt)];
+    let properties = props_json(eoj, &props);
     let socket = net::open_ephemeral_socket()?;
     let tid = next_tid();
-    let frame = Frame::standard(tid, CONTROLLER, eoj, Esv::SetI, props.clone());
+    let frame = Frame::standard(tid, CONTROLLER, eoj, Esv::SetI, props);
     socket
         .send_to(&build_frame(&frame)?, dst_for(ip, multicast))
         .map_err(|e| AppError::new(ErrKind::Network, format!("送信失敗: {e}")))?;
@@ -312,7 +313,7 @@ pub fn set_nowait(
         "eoj": eoj.to_hex(),
         "esv": Esv::SetI.name(),
         "result": "sent",
-        "properties": props_json(eoj, &props),
+        "properties": properties,
     }))
 }
 
