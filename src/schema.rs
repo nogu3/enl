@@ -119,8 +119,12 @@ fn set() -> Value {
         "properties": {
             "ip": { "type": "string" },
             "eoj": { "type": "string", "description": "EOJ (6 hex 桁)" },
-            "esv": { "type": "string", "description": "応答 ESV 名 (例 Set_Res)" },
-            "result": { "type": "string", "const": "accepted" },
+            "esv": { "type": "string", "description": "ESV 名 (SetC 応答時 SetRes / --nowait 時 SetI)" },
+            "result": {
+                "type": "string",
+                "enum": ["accepted", "sent"],
+                "description": "accepted=機器が受理を確認 (SetC) / sent=送信のみで実行未確認 (--nowait)"
+            },
             "properties": { "type": "array", "items": property() }
         },
         "required": ["ip", "eoj", "esv", "result", "properties"],
@@ -294,5 +298,18 @@ mod tests {
         for k in ["epc", "pdc", "edt_hex"] {
             assert!(req.contains(&k), "property に {k} 必須が無い");
         }
+    }
+
+    #[test]
+    fn set_result_covers_accepted_and_sent() {
+        // set の result は SetC 応答確認 (accepted) と --nowait 送信のみ (sent) の 2 値。
+        let result = &set()["properties"]["result"];
+        let vals: Vec<&str> = result["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(vals, vec!["accepted", "sent"]);
     }
 }
