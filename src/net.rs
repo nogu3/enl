@@ -47,7 +47,6 @@ pub fn open_socket() -> Result<UdpSocket, AppError> {
 /// 機器の応答は要求の送信元ポートでなく常に 3610 固定宛てに返ることを
 /// 確認済みのため、このソケットで応答は受信できない (受信しない前提で使う)。
 /// エフェメラルは AddrInUse が起き得ないためリトライしない。
-#[allow(dead_code)]
 pub fn open_ephemeral_socket() -> Result<UdpSocket, AppError> {
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
     UdpSocket::bind(addr)

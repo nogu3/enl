@@ -492,6 +492,24 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_seti_request() {
+        // SetI (0x60, 応答不要): set --nowait が送るフレーム。
+        let buf = build(&Frame::standard(
+            0x002A,
+            Eoj([0x05, 0xFF, 0x01]),
+            Eoj([0x02, 0x91, 0x01]),
+            Esv::SetI,
+            vec![Property::new(0x80, vec![0x30])],
+        ))
+        .unwrap();
+        assert_eq!(
+            buf,
+            [0x10, 0x81, 0x00, 0x2A, 0x05, 0xFF, 0x01, 0x02, 0x91, 0x01, 0x60, 0x01, 0x80, 0x01, 0x30]
+        );
+        roundtrip(&buf);
+    }
+
+    #[test]
     fn roundtrip_get_response_multi_prop() {
         let buf = build(&Frame::standard(
             0x1234,
