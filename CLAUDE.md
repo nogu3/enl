@@ -60,7 +60,7 @@ one-shot の Get/Set/Discovery は単一ソケット + `set_read_timeout` のル
 - **enl 同士の 3610 共存モデル (v1.5.0、実機検証済み)**:
   - `listen` は `224.0.23.0:3610`（multicast グループアドレスそのもの）に `SO_REUSEADDR` 付きで bind して join する。このソケットは multicast しか受けない。グループアドレスへの bind は Linux 前提。
   - one-shot（get/set/discover/describe/raw）は `0.0.0.0:3610` に `SO_REUSEADDR` 付きで bind する。unicast 応答は wildcard 側に届くため listen と共存できる。共存には**双方**の REUSEADDR が必要。
-  - one-shot 同士は flock（`$XDG_RUNTIME_DIR/enl-3610.lock`、無ければ `/tmp`）で直列化する。REUSEADDR 下では wildcard の二重バインドが通ってしまい、後着ソケットが unicast を横取りするため（実機検証済み）。ロック取得は 30ms 間隔・最大 2000ms 待ちで、枯渇したら exit 5。
+  - one-shot 同士は flock（`/tmp/enl-3610.lock`、ホストグローバル固定パス）で直列化する。cron / systemd service / 手動実行が同じロックを共有できるよう per-user の XDG_RUNTIME_DIR は使わない。REUSEADDR 下では wildcard の二重バインドが通ってしまい、後着ソケットが unicast を横取りするため（実機検証済み）。ロック取得は 30ms 間隔・最大 2000ms 待ちで、枯渇したら exit 5。
   - トレードオフ: listen は unicast 宛ての INF/INFC を受けられない（状変アナウンスは multicast なので実害はほぼ無い）。
   - wildcard ソケットは join しなくても multicast を受信しうる（`IP_MULTICAST_ALL` 既定 1）。one-shot は既存の「期待 IP + EHD/TID 一致」フィルタで読み飛ばすので実害なし。
 - Home Assistant の ECHONET 統合など REUSEADDR を立てない外部プロセスが 3610 を握っている間は従来どおり応答が吸われる／bind できない。`EADDRINUSE` に限り 30ms 間隔・最大 2000ms リトライしてから exit 5 となり、stderr の detail で「再試行しても解放されず」と区別できる。最終的に本 CLI を唯一のコントローラにする（元のゴールと一致）。

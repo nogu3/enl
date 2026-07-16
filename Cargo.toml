@@ -2,6 +2,7 @@
 name = "enl"
 version = "1.5.0"
 edition = "2021"
+rust-version = "1.89"
 description = "ECHONET Lite 専用 CLI。AIネイティブ・ステートレス・one-shot。"
 license = "MIT"
 authors = ["nogu3"]
