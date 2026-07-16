@@ -284,6 +284,39 @@ pub fn set(
     }))
 }
 
+/// IP / EOJ / EPC / EDT を指定して Set (SetI = 応答不要, fire-and-forget)。
+///
+/// エフェメラルポートから送信のみ行い 3610 をバインドしないため、listen の
+/// 3610 専有と共存できる。機器の応答は 3610 固定宛てに返る (実機検証 2026-07-16)
+/// ため応答は待たず、機器リジェクト (SetI_SNA) も検知できない。exit 0 は
+/// 「送信できた」ことしか意味しない。実行確認は listen の INF か後続 get に委ねる。
+#[allow(dead_code)] // Task 3 で CLI に wired in される
+pub fn set_nowait(
+    ip: IpAddr,
+    eoj: Eoj,
+    epc: u8,
+    edt: Vec<u8>,
+    multicast: bool,
+) -> Result<Value, AppError> {
+    tracing::info!(%ip, eoj = eoj.to_hex(), epc = format!("{epc:02X}"), transport = transport_name(multicast), "set (SetI, nowait) 送信");
+
+    let props = vec![Property::new(epc, edt)];
+    let socket = net::open_ephemeral_socket()?;
+    let tid = next_tid();
+    let frame = Frame::standard(tid, CONTROLLER, eoj, Esv::SetI, props.clone());
+    socket
+        .send_to(&build_frame(&frame)?, dst_for(ip, multicast))
+        .map_err(|e| AppError::new(ErrKind::Network, format!("送信失敗: {e}")))?;
+
+    Ok(json!({
+        "ip": ip.to_string(),
+        "eoj": eoj.to_hex(),
+        "esv": Esv::SetI.name(),
+        "result": "sent",
+        "properties": props_json(eoj, &props),
+    }))
+}
+
 /// プロパティマップ introspection。Get/Set/状変マップを引く。
 pub fn describe(
     ip: IpAddr,
@@ -829,5 +862,31 @@ mod tests {
             vec![Property::new(0x80, vec![0u8; 256])],
         );
         assert_eq!(build_frame(&frame).unwrap_err().kind, ErrKind::Usage);
+    }
+
+    #[test]
+    fn set_nowait_sends_seti_from_ephemeral_and_returns_sent() {
+        use std::net::UdpSocket;
+        use std::time::Duration;
+        // 127.0.0.1:3610 で機器役として受ける。ローカルで 3610 が使用中
+        // (enl listen 等) だとこのテストは bind に失敗する。
+        let dev = UdpSocket::bind("127.0.0.1:3610").expect("127.0.0.1:3610 が使用中");
+        let eoj = Eoj::from_hex("029101").unwrap();
+
+        let out = set_nowait("127.0.0.1".parse().unwrap(), eoj, 0x80, vec![0x30], false).unwrap();
+        assert_eq!(out["result"], "sent");
+        assert_eq!(out["esv"], "SetI");
+        assert_eq!(out["ip"], "127.0.0.1");
+        assert_eq!(out["eoj"], "029101");
+        assert_eq!(out["properties"][0]["edt_hex"], "30");
+
+        // set_nowait は既に return 済み = 応答を待っていない。フレーム内容を検証。
+        dev.set_read_timeout(Some(Duration::from_millis(2000))).unwrap();
+        let mut buf = [0u8; 1500];
+        let (n, from) = dev.recv_from(&mut buf).unwrap();
+        // EDATA: ESV=0x60 (SetI), OPC=1, EPC=0x80, PDC=1, EDT=0x30
+        assert_eq!(&buf[10..n], &[0x60, 0x01, 0x80, 0x01, 0x30]);
+        // 送信元がエフェメラルポート (3610 ではない) であること
+        assert_ne!(from.port(), 3610);
     }
 }
