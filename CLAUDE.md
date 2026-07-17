@@ -1,160 +1,160 @@
 # CLAUDE.md
 
-ECHONET Lite 専用 CLI ツール。AIネイティブなスマートホーム CLI 群の第一弾。
+A CLI tool dedicated to ECHONET Lite. The first in a series of AI-native smart-home CLIs.
 
-> 名前: **`enl`**（ECHONET Lite）確定。**パブリックの独立リポジトリ**。
-> パブリックのため、自宅の実機 IP・MAC・ネットワーク構成をテスト/サンプル/コミットに含めない。サンプルは `192.0.2.0/24`（RFC 5737 ドキュメント用）等のダミーを使う。
-
----
-
-## プロジェクトの目的
-
-Home Assistant の「重い・データ構造が不透明・可観測性が低い」を脱却し、UNIX哲学に基づいた軽量ツール群を作る。本リポジトリはその第一弾として **ECHONET Lite との通信に特化**する。
-
-**作らないもの:** SwitchBot / Matter / ECHONET を内包するモノリス。各プロトコルは独立した薄い CLI とし、横断オーケストレーションは外部（cron / n8n）に委譲する。本ツールは ECHONET Lite のことだけをうまくやる。
+> Name: **`enl`** (ECHONET Lite), finalized. **Public, standalone repository.**
+> Because it is public, never include real home-device IPs, MACs, or network topology in tests/samples/commits. Use dummies such as `192.0.2.0/24` (RFC 5737 documentation range) for samples.
 
 ---
 
-## 絶対に守る設計原則（変更時は要相談）
+## Project goal
 
-1. **ステートレス / one-shot**
-   デーモン化しない。コマンドは「ソケットを開く → UDP を投げる → タイムアウト付きで応答を集める → 終了」で完結する。定期実行・状態保持・スケジューリングは一切持たない。
-2. **stdout は純粋な構造化 JSON のみ**
-   人間向けの装飾・進捗・ログを stdout に混ぜない。`jq` と LLM の Function Calling がそのまま食えること。1コマンド=1 JSON。
-3. **診断は stderr に構造化ログ**
-   ネットワークエラー・タイムアウト・機器リジェクト(SNA)はすべて `tracing` の構造化ログで stderr へ。原因切り分けが即できる粒度を出す。
-4. **未知の機器・EPC で絶対に壊れない**
-   知らないクラス／知らない EPC が来ても、生 hex をロスレスに出して正常終了する。デコード辞書は「あれば付加情報」であって必須ではない。
+Escape Home Assistant's "heavy, opaque data structures, poor observability" by building a set of lightweight tools based on the UNIX philosophy. This repository is the first of them and **specializes in ECHONET Lite communication only**.
+
+**What we will NOT build:** a monolith that embeds SwitchBot / Matter / ECHONET. Each protocol gets its own thin, independent CLI; cross-protocol orchestration is delegated to external tools (cron / n8n). This tool does one thing well: ECHONET Lite.
 
 ---
 
-## 技術スタック
+## Non-negotiable design principles (discuss before changing)
 
-| 領域 | 採用 | 備考 |
+1. **Stateless / one-shot**
+   No daemonization. Every command completes as "open a socket → send UDP → collect responses with a timeout → exit". No periodic execution, no state, no scheduling.
+2. **stdout is pure structured JSON only**
+   No human-oriented decoration, progress, or logs on stdout. `jq` and LLM function calling must be able to consume it as-is. One command = one JSON.
+3. **Diagnostics go to stderr as structured logs**
+   Network errors, timeouts, and device rejections (SNA) all go to stderr via `tracing` structured logs, at a granularity that makes root-cause isolation immediate.
+4. **Never break on unknown devices or EPCs**
+   When an unknown class or unknown EPC arrives, emit the raw hex losslessly and exit successfully. The decode dictionary is "extra info when available", never required.
+
+---
+
+## Tech stack
+
+| Area | Choice | Notes |
 |---|---|---|
-| 言語 | Rust | 安全性・バイナリサイズ・速度 |
+| Language | Rust | Safety, binary size, speed |
 | CLI | `clap` (derive) | |
-| ネットワーク | `std::net::UdpSocket` + `socket2` | socket2 は `SO_REUSEADDR` 設定のみに使う。**tokio は入れない**（下記参照） |
-| バイナリ codec | **手書き（依存ゼロ）＝確定** | binrw / nom は不採用（理由は下記） |
-| ログ | `tracing` + `tracing-subscriber` | stderr 出力、`RUST_LOG` で制御 |
-| シリアライズ | `serde` + `serde_json` | |
+| Networking | `std::net::UdpSocket` + `socket2` | socket2 is used only to set `SO_REUSEADDR`. **No tokio** (see below) |
+| Binary codec | **Hand-written (zero deps) = final** | binrw / nom rejected (reasons below) |
+| Logging | `tracing` + `tracing-subscriber` | stderr output, controlled via `RUST_LOG` |
+| Serialization | `serde` + `serde_json` | |
 
-### なぜ tokio を入れないか
-one-shot の Get/Set/Discovery は単一ソケット + `set_read_timeout` のループで完結する。INF 通知の待受もブロッキング recv で書ける。tokio が報われるのは「多数台を並列ポーリング」だけで、当面は逐次かスレッドで十分。**軽量さを採用理由にしている以上、tokio は実需が出るまで入れない。**
+### Why no tokio
+One-shot Get/Set/Discovery completes with a single socket + a `set_read_timeout` loop. Waiting for INF notifications can be written with blocking recv. tokio only pays off for "polling many devices in parallel", and for now sequential or threaded is enough. **Since lightness is the reason this tool exists, tokio stays out until there is real demand.**
 
-### なぜ codec は手書き（依存ゼロ）か
-**決定: 手書き。binrw も nom も使わない。**
+### Why the codec is hand-written (zero deps)
+**Decision: hand-written. Neither binrw nor nom.**
 
-- フレームは「12byte ヘッダ + TLV 的繰り返し」の単純構造で、依存ゼロの手書きでも 200 行弱 + テストで堅牢に書ける。
-- nom はパース専用。このツールは **パーサとビルダーの両方**が必要なので build が手書きになり、parse/build の非対称バグを生む。
-- binrw は双方向を宣言的に書けるが、外部 crate を1つ抱える＝**SemVer 追従・Dependabot PR・供給網リスク**が発生する。「軽くて壊れない」を掲げる本ツールでは、この依存に見合う複雑さがフレームに無い。
-- 手書きの方針: codec はラウンドトリップテスト（parse→build→parse が一致）を必ず持つこと。これが宣言的 codec の代わりに非対称バグを防ぐ砦になる。
-
----
-
-## ⚠️ 最重要の落とし穴: ポート 3610
-
-仕様準拠の機器の多くは、応答を**送信元エフェメラルポートではなく 3610 番に返す**。確実に応答を受けるには 3610 で受信する必要がある。
-
-- **応答先が 3610 固定であることは実機検証済み (2026-07-16)**: エフェメラル送信元ポートで unicast Get を送ると全機器が無応答になり、tcpdump では応答が常に送信元ポートでなく 3610 宛てに返ることを確認した。「送信系をエフェメラル化して応答も待つ」設計は成立しない。
-- **enl 同士の 3610 共存モデル (v1.5.0、実機検証済み)**:
-  - `listen` は `224.0.23.0:3610`（multicast グループアドレスそのもの）に `SO_REUSEADDR` 付きで bind して join する。このソケットは multicast しか受けない。グループアドレスへの bind は Linux 前提。
-  - one-shot（get/set/discover/describe/raw）は `0.0.0.0:3610` に `SO_REUSEADDR` 付きで bind する。unicast 応答は wildcard 側に届くため listen と共存できる。共存には**双方**の REUSEADDR が必要。
-  - one-shot 同士は flock（`/tmp/enl-3610.lock`、ホストグローバル固定パス）で直列化する。cron / systemd service / 手動実行が同じロックを共有できるよう per-user の XDG_RUNTIME_DIR は使わない。REUSEADDR 下では wildcard の二重バインドが通ってしまい、後着ソケットが unicast を横取りするため（実機検証済み）。ロック取得は 30ms 間隔・最大 2000ms 待ちで、枯渇したら exit 5。
-  - トレードオフ: listen は unicast 宛ての INF/INFC を受けられない（状変アナウンスは multicast なので実害はほぼ無い）。
-  - wildcard ソケットは join しなくても multicast を受信しうる（`IP_MULTICAST_ALL` 既定 1）。one-shot は既存の「期待 IP + EHD/TID 一致」フィルタで読み飛ばすので実害なし。
-- Home Assistant の ECHONET 統合など REUSEADDR を立てない外部プロセスが 3610 を握っている間は従来どおり応答が吸われる／bind できない。`EADDRINUSE` に限り 30ms 間隔・最大 2000ms リトライしてから exit 5 となり、stderr の detail で「再試行しても解放されず」と区別できる。最終的に本 CLI を唯一のコントローラにする（元のゴールと一致）。
-- バインド失敗・ロック取得失敗は専用 exit code (5) で切り分けられること。
-- `set --nowait` は SetI (0x60, 応答不要) をエフェメラルポートから送信のみ行う。3610 にもロックにも触れない最速経路として残る。機器リジェクト (SetI_SNA) は検知できず、exit 0 は送信成功のみを意味する（従来どおり）。
+- The frame is a simple "12-byte header + TLV-like repetition" structure; a zero-dependency hand-written codec stays robust at under ~200 lines plus tests.
+- nom is parse-only. This tool needs **both a parser and a builder**, so the builder would be hand-written anyway, creating parse/build asymmetry bugs.
+- binrw can declare both directions, but adds an external crate = **SemVer tracking, Dependabot PRs, supply-chain risk**. For a tool whose banner is "light and unbreakable", the frame has no complexity that justifies that dependency.
+- Hand-written policy: the codec must always have round-trip tests (parse→build→parse must match). This is the rampart against asymmetry bugs in place of a declarative codec.
 
 ---
 
-## フレーム構造（実装の核）
+## ⚠️ The most important pitfall: port 3610
+
+Most spec-compliant devices send replies **to port 3610, not to the sender's ephemeral source port**. To reliably receive responses you must listen on 3610.
+
+- **Replies being fixed to 3610 is verified on real devices (2026-07-16)**: sending a unicast Get from an ephemeral source port got zero replies from every device, and tcpdump showed responses always going to 3610 rather than the source port. A design of "send from an ephemeral port and wait for the reply there" does not work.
+- **Coexistence model for enl processes on 3610 (v1.5.0, verified on real devices)**:
+  - `listen` binds to `224.0.23.0:3610` (the multicast group address itself) with `SO_REUSEADDR` and joins the group. This socket receives multicast only. Binding to a group address assumes Linux.
+  - One-shot commands (get/set/discover/describe/raw) bind to `0.0.0.0:3610` with `SO_REUSEADDR`. Unicast replies arrive at the wildcard socket, so they coexist with `listen`. Coexistence requires REUSEADDR on **both** sides.
+  - One-shots serialize among themselves via flock (`/tmp/enl-3610.lock`, a host-global fixed path). Per-user XDG_RUNTIME_DIR is deliberately not used so that cron / systemd services / manual runs share the same lock. This is needed because under REUSEADDR a second wildcard bind succeeds and the later socket steals unicast traffic (verified on real devices). Lock acquisition retries every 30ms for up to 2000ms; on exhaustion, exit 5.
+  - Trade-off: `listen` cannot receive unicast-addressed INF/INFC (state-change announcements are multicast, so there is almost no practical impact).
+  - A wildcard socket may receive multicast even without joining (`IP_MULTICAST_ALL` defaults to 1). One-shots skip those via the existing "expected IP + EHD/TID match" filter, so no practical impact.
+- While an external process that does not set REUSEADDR (e.g. Home Assistant's ECHONET integration) holds 3610, responses are still swallowed / bind fails as before. Only on `EADDRINUSE` we retry every 30ms for up to 2000ms and then exit 5; the stderr detail distinguishes "still not released after retrying". Ultimately this CLI becomes the sole controller (consistent with the original goal).
+- Bind failures and lock-acquisition failures must be distinguishable via the dedicated exit code (5).
+- `set --nowait` sends SetI (0x60, no response expected) from an ephemeral port, send-only. It remains the fastest path, touching neither 3610 nor the lock. Device rejections (SetI_SNA) cannot be detected; exit 0 means "sent" only (as before).
+
+---
+
+## Frame structure (the core of the implementation)
 
 ```
 EHD1(1) EHD2(1) TID(2) | EDATA
-EDATA(通常): SEOJ(3) DEOJ(3) ESV(1) OPC(1) [EPC(1) PDC(1) EDT(PDC)]×OPC
+EDATA(normal): SEOJ(3) DEOJ(3) ESV(1) OPC(1) [EPC(1) PDC(1) EDT(PDC)]×OPC
 ```
 
-データモデルに **OPC（処理プロパティ数）と PDC（各 EDT のバイト長）を必ず含める**こと（初期の要件リストから漏れていた頻出ミス）。
+The data model **must include OPC (number of processed properties) and PDC (byte length of each EDT)** — a frequent mistake that was missing from the initial requirements list.
 
-実装時に最初から型へ織り込む分岐:
+Branches to bake into the types from the start:
 
-- **SETGET 系 (ESV `0x6E`/`0x7E`/`0x5E`)**: EDATA が `OPCSet + setブロック群 + OPCGet + getブロック群` の二段構造。通常フレームと enum で型を分ける。
-- **SNA / エラー応答 (ESV `0x5x`: `0x51` SetC_SNA, `0x52` Get_SNA 等)**: 要件の「機器からのリジェクト」がこれ。**構造化エラーとして区別し、JSON・stderr・exit code の3つに反映する。**
-- **EHD2 = `0x82`（任意フォーマット）**: 汎用パース不能。明示的にエラー or 生バイト pass-through とする（壊れない方を選ぶ）。
+- **SETGET family (ESV `0x6E`/`0x7E`/`0x5E`)**: EDATA is a two-stage structure of `OPCSet + set blocks + OPCGet + get blocks`. Separate it from normal frames with an enum.
+- **SNA / error responses (ESV `0x5x`: `0x51` SetC_SNA, `0x52` Get_SNA, etc.)**: this is the "rejection from the device" in the requirements. **Distinguish it as a structured error and reflect it in all three of JSON, stderr, and exit code.**
+- **EHD2 = `0x82` (arbitrary format)**: not generically parseable. Explicitly error or pass raw bytes through (choose whichever does not break).
 
-### EDT デコードはレイヤ分離する
-- **codec コア = ダンプ層**: 常に `生 hex + PDC` をロスレスで出す。未知機器でも壊れない。
-- **デコード = プロパティ定義テーブル駆動の任意レイヤ**: 辞書にあれば人間可読値を併記、なければ生 hex のまま。
-  これで「堅牢性」と「AIネイティブ（辞書なければ LLM が生 hex を解釈）」を両立する。
-
----
-
-## 実装順序（要件の Step1/2 は逆にする）
-
-ディスカバリ自体が「正しいフレームを送って応答をパースする」処理なので、codec が基盤。
-
-1. **codec**: フレームのデータモデル定義 + パーサ + ビルダー（+ ユニットテスト）。← 最初にここ
-2. **discovery**: ノードプロファイル `0x0EF001` に Get で **EPC `0xD6`（自ノードインスタンスリスト）** を要求し集約。自分（コントローラ）の SEOJ は `0x05FF01`。
-3. **get / set**: IP・EOJ・EPC を指定した取得・操作。
-
-### 入れると強い機能（優先度: 中）
-`describe <ip> <eoj>`: プロパティマップ introspection。EPC `0x9F`(Get map) / `0x9E`(Set map) / `0x9D`(状変) を引いて「この機器に何ができるか」を機械的に提示。HA で失われた可観測性が戻り、AI にも使用可能プロパティを渡せる。
-**注意:** プロパティマップは対応数が 15 以下 / 16 以上で**ビット符号化が2形式に変わる**。専用パーサが要る。
+### Keep EDT decoding in a separate layer
+- **Codec core = dump layer**: always emits `raw hex + PDC` losslessly. Never breaks on unknown devices.
+- **Decoding = optional layer driven by a property definition table**: when the dictionary has an entry, add a human-readable value alongside; otherwise leave the raw hex.
+  This reconciles "robustness" with "AI-native" (without a dictionary, the LLM interprets the raw hex).
 
 ---
 
-## 規約
+## Implementation order (Steps 1/2 of the requirements are swapped)
+
+Discovery itself is "send a correct frame and parse the responses", so the codec is the foundation.
+
+1. **codec**: frame data model + parser + builder (+ unit tests). ← Start here
+2. **discovery**: send Get for **EPC `0xD6` (self-node instance list)** to the node profile `0x0EF001` and aggregate. Our own (controller) SEOJ is `0x05FF01`.
+3. **get / set**: read and operate by IP, EOJ, and EPC.
+
+### Strong feature to add (priority: medium)
+`describe <ip> <eoj>`: property-map introspection. Query EPC `0x9F` (Get map) / `0x9E` (Set map) / `0x9D` (state-change) and mechanically present "what this device can do". Restores the observability lost in HA and hands usable properties to AI.
+**Caution:** property maps switch between **two bit-encoding formats** at 15-or-fewer vs 16-or-more supported properties. A dedicated parser is required.
+
+---
+
+## Conventions
 
 ### stdout JSON
-- 成功時は結果データそのものを stdout に出す（過剰なラッパで包まない＝jq が扱いやすい）。
-- 各サブコマンドの出力スキーマはドキュメント化する。スキーマは安定させる（LLM が依存するため）。
-- バイナリ値は常に `"edt_hex"` を含める。デコードできた場合のみ `"value"` 等を追加する。
+- On success, print the result data itself to stdout (no excessive wrapper = easy for jq).
+- Document the output schema of each subcommand. Keep schemas stable (LLMs depend on them).
+- Binary values always include `"edt_hex"`. Add `"value"` etc. only when decoding succeeded.
 
-### stderr エラー
-- 機械可読エラーは stderr に JSON で出す: `{"error": {"kind": "...", "detail": "...", ...}}`。
-- `kind` の例: `timeout` / `device_rejected` / `network` / `parse` / `bind` / `usage`。
+### stderr errors
+- Machine-readable errors go to stderr as JSON: `{"error": {"kind": "...", "detail": "...", ...}}`.
+- Example `kind`s: `timeout` / `device_rejected` / `network` / `parse` / `bind` / `usage`.
 
-### exit code（cron / n8n が分岐できるように分ける）
-| code | 意味 |
+### Exit codes (split so cron / n8n can branch)
+| code | meaning |
 |---|---|
-| 0 | 成功 |
-| 2 | CLI 引数エラー（clap 既定。**他用途で使わない**） |
-| 3 | タイムアウト（応答なし） |
-| 4 | 機器リジェクト（SNA） |
-| 5 | ネットワーク / バインド失敗 |
-| 1 | その他想定外 |
+| 0 | success |
+| 2 | CLI argument error (clap default; **never reuse for anything else**) |
+| 3 | timeout (no response) |
+| 4 | device rejection (SNA) |
+| 5 | network / bind failure |
+| 1 | other unexpected |
 
 ---
 
-## マルチキャスト
+## Multicast
 
-- アドレス: `224.0.23.0:3610`
-- `listen` は `224.0.23.0:3610`（グループアドレスそのもの）に bind して `join_multicast_v4` する。送信系コマンドは join しない（応答は unicast で返るため不要。join しないので自分の送信フレームがループバックで戻る問題も起きない）。
-- `discover` は「CIDR sweep + multicast 1 発」の常時併用。multicast は ECHONET Lite 標準の探索方式で、CIDR が分からなくても引数なしで探索できる。タイムアウトは CLI フラグで調整可能。
-- **検証環境の罠**: 「unicast を無視し multicast にのみ応答する機器がいる」ように見えたら、まず検証環境を疑う。WSL2 / Windows 越しの UDP はエフェメラル送信元ポートの応答を取りこぼす（LAN 直結 Linux からの再検証で全機器が unicast に応答することを確認済み）。実機検証は必ず LAN 直結ホストから行う。
-- `get` / `set` / `describe` / `raw` は `--multicast` で送信先だけ `224.0.23.0` に切り替えられる。`ip` 引数は「応答を期待する送信元」になる。自動フォールバック（unicast 失敗時の multicast 再試行）はしない — 所要時間が読めなくなり one-shot の透明性が下がるため明示フラグとする。注意: multicast の Set は DEOJ が一致する **LAN 上の全機器** が実行する（応答レポートは `ip` の機器のみ）。
-- 応答の採用条件は「期待 IP 一致 + EHD(0x1081) + TID 一致」。multicast は他コントローラのトラフィックと混線しうるため必須で、unicast にも適用する。
-- multicast の egress インタフェースは制御しない（ルーティングテーブル任せ）。socket2 は SO_REUSEADDR のために導入済みだが、egress 制御は実需が出るまで足さない（YAGNI）。multi-homed 環境で意図しないインタフェースに流れうる（実需が出たら `-i` 連動の egress 制御を追加する）。
+- Address: `224.0.23.0:3610`
+- `listen` binds to `224.0.23.0:3610` (the group address itself) and calls `join_multicast_v4`. Sending commands do not join (replies come back as unicast, so joining is unnecessary; not joining also avoids our own sent frames looping back).
+- `discover` always combines "CIDR sweep + one multicast probe". Multicast is ECHONET Lite's standard discovery method and works with no arguments even when the CIDR is unknown. The timeout is adjustable via a CLI flag.
+- **Test-environment trap**: if it looks like "some device ignores unicast and only answers multicast", suspect the test environment first. UDP through WSL2 / Windows drops replies to ephemeral source ports (re-verification from a LAN-attached Linux host confirmed all devices answer unicast). Always verify against real devices from a directly LAN-attached host.
+- `get` / `set` / `describe` / `raw` can switch only the destination to `224.0.23.0` with `--multicast`. The `ip` argument becomes "the source we expect the reply from". No automatic fallback (retrying multicast when unicast fails) — it makes duration unpredictable and hurts one-shot transparency, so it is an explicit flag. Note: a multicast Set is executed by **every device on the LAN** whose DEOJ matches (the response report covers only the `ip` device).
+- Reply acceptance requires "expected IP match + EHD (0x1081) + TID match". Multicast can cross-talk with other controllers' traffic so this is mandatory, and it is applied to unicast too.
+- The multicast egress interface is not controlled (left to the routing table). socket2 is already in for SO_REUSEADDR, but egress control stays out until there is real demand (YAGNI). On multi-homed hosts traffic may leave an unintended interface (add `-i`-linked egress control when real demand appears).
 
 ---
 
-## 開発コマンド（雛形）
+## Development commands (template)
 
 ```bash
 cargo build
-cargo test                 # codec のラウンドトリップ(parse→build→parse)テストを厚く
+cargo test                 # keep the codec round-trip (parse→build→parse) tests thick
 cargo clippy -- -D warnings
 RUST_LOG=debug cargo run -- discover
 ```
 
 ---
 
-## やらないこと（リマインダ）
+## Things we do NOT do (reminder)
 
-- 他プロトコル(SwitchBot/Matter)をこのバイナリに足さない。
-- デーモン・常駐・内部スケジューラを足さない。
-- 未知 EPC で panic / エラー終了させない（生 hex で返す）。
-- 実需が出る前に tokio / 並行化を入れない。
-- stdout にログ・進捗・装飾を混ぜない。
+- Do not add other protocols (SwitchBot/Matter) to this binary.
+- Do not add a daemon, resident process, or internal scheduler.
+- Do not panic / error-exit on unknown EPCs (return raw hex).
+- Do not add tokio / concurrency before real demand exists.
+- Do not mix logs, progress, or decoration into stdout.
