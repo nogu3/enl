@@ -16,6 +16,7 @@ pub fn decode(eoj: Eoj, epc: u8, edt: &[u8]) -> Option<Value> {
     // スーパークラス共通 EPC (全機器)
     match epc {
         0x82 => return decode_version(eoj, edt),
+        0x84 => return decode_instant_power(edt),
         0x8A => return decode_manufacturer(edt),
         0x9D..=0x9F => return parse_property_map(edt).map(
             |m| json!({ "property_map": m.iter().map(|e| format!("{e:02X}")).collect::<Vec<_>>() }),
@@ -87,18 +88,30 @@ const COMMON_ENUM: &[EnumProp] = &[EnumProp {
 }];
 
 /// 家庭用エアコン (0x0130) 固有の enum 型 EPC。
-const AIRCON_ENUM: &[EnumProp] = &[EnumProp {
-    epc: 0xB0,
-    key: "operation_mode",
-    values: &[
-        (0x41, "auto"),
-        (0x42, "cool"),
-        (0x43, "heat"),
-        (0x44, "dry"),
-        (0x45, "fan"),
-        (0x40, "other"),
-    ],
-}];
+const AIRCON_ENUM: &[EnumProp] = &[
+    EnumProp {
+        epc: 0xB0,
+        key: "operation_mode",
+        values: &[
+            (0x41, "auto"),
+            (0x42, "cool"),
+            (0x43, "heat"),
+            (0x44, "dry"),
+            (0x45, "fan"),
+            (0x40, "other"),
+        ],
+    },
+    EnumProp {
+        epc: 0xA3,
+        key: "swing_mode",
+        values: &[
+            (0x31, "off"),
+            (0x41, "vertical"),
+            (0x42, "horizontal"),
+            (0x43, "both"),
+        ],
+    },
+];
 
 /// 電動雨戸・シャッター (0x0263) 固有の enum 型 EPC。
 const SHUTTER_ENUM: &[EnumProp] = &[
@@ -197,6 +210,19 @@ fn decode_version(eoj: Eoj, edt: &[u8]) -> Option<Value> {
     }
 }
 
+/// 0x84 瞬時消費電力計測値 (機器オブジェクトスーパークラス共通)。
+/// 2 バイト unsigned、単位 W (0x0000-0xFFFD)。範囲外は解釈せず生 hex のまま。
+fn decode_instant_power(edt: &[u8]) -> Option<Value> {
+    if edt.len() != 2 {
+        return None;
+    }
+    let w = (u16::from(edt[0]) << 8) | u16::from(edt[1]);
+    if w > 0xFFFD {
+        return None;
+    }
+    Some(json!({ "instant_power_w": w }))
+}
+
 /// 0x8A メーカコード: 3 バイト (ECHONET コンソーシアム規定)。
 /// 常に code を hex で出し、既知メーカは社名を併記する。
 fn decode_manufacturer(edt: &[u8]) -> Option<Value> {
@@ -246,6 +272,13 @@ fn decode_aircon(epc: u8, edt: &[u8]) -> Option<Value> {
         }),
         // 0xBB 室内温度計測値: signed ℃
         0xBB => edt.first().map(|&v| json!({ "room_temp_c": v as i8 })),
+        // 0xBE 外気温度計測値: signed ℃
+        0xBE => edt.first().map(|&v| json!({ "outdoor_temp_c": v as i8 })),
+        // 0xBA 室内相対湿度計測値: unsigned % (0x00-0x64)。範囲外は解釈せず生 hex のまま
+        0xBA => match edt.first() {
+            Some(&v @ 0x00..=0x64) => Some(json!({ "room_humidity_percent": v })),
+            _ => None,
+        },
         // 0xA0 風量設定: 自動=0x41 / レベル 0x31-0x38 (1-8)
         0xA0 => match edt.first() {
             Some(0x41) => Some(json!({ "air_flow": "auto" })),
@@ -360,6 +393,7 @@ pub fn build_property_map(epcs: &[u8]) -> Vec<u8> {
 const COMMON_EPC: &[(u8, &str)] = &[
     (0x80, "power"),
     (0x82, "standard_version"),
+    (0x84, "instant_power"),
     (0x8A, "manufacturer"),
     (0x9D, "status_change_map"),
     (0x9E, "set_property_map"),
@@ -369,9 +403,12 @@ const COMMON_EPC: &[(u8, &str)] = &[
 /// 家庭用エアコン (0x0130) 固有 EPC の正規名。
 const AIRCON_EPC: &[(u8, &str)] = &[
     (0xA0, "air_flow"),
+    (0xA3, "swing_mode"),
     (0xB0, "operation_mode"),
     (0xB3, "target_temperature"),
+    (0xBA, "room_humidity"),
     (0xBB, "room_temperature"),
+    (0xBE, "outdoor_temperature"),
 ];
 
 /// 電動雨戸・シャッター (0x0263) 固有 EPC の正規名。
@@ -589,6 +626,56 @@ mod tests {
         let eoj = Eoj([0x01, 0x30, 1]);
         assert_eq!(decode(eoj, 0xA0, &[0x41]).unwrap()["air_flow"], "auto");
         assert_eq!(decode(eoj, 0xA0, &[0x33]).unwrap()["air_flow_level"], 3);
+    }
+
+    #[test]
+    fn aircon_outdoor_temp_signed() {
+        let eoj = Eoj([0x01, 0x30, 1]);
+        assert_eq!(decode(eoj, 0xBE, &[0x1B]).unwrap()["outdoor_temp_c"], 27);
+        // 0xF6 = -10℃ (signed)
+        assert_eq!(decode(eoj, 0xBE, &[0xF6]).unwrap()["outdoor_temp_c"], -10);
+    }
+
+    #[test]
+    fn aircon_room_humidity() {
+        let eoj = Eoj([0x01, 0x30, 1]);
+        assert_eq!(
+            decode(eoj, 0xBA, &[0x37]).unwrap()["room_humidity_percent"],
+            55
+        );
+        assert_eq!(
+            decode(eoj, 0xBA, &[0x64]).unwrap()["room_humidity_percent"],
+            100
+        );
+        // 範囲外 (>100%) は解釈しない → 生 hex のまま
+        assert!(decode(eoj, 0xBA, &[0x65]).is_none());
+    }
+
+    #[test]
+    fn aircon_swing_mode() {
+        let eoj = Eoj([0x01, 0x30, 1]);
+        assert_eq!(decode(eoj, 0xA3, &[0x31]).unwrap()["swing_mode"], "off");
+        assert_eq!(decode(eoj, 0xA3, &[0x43]).unwrap()["swing_mode"], "both");
+        // set の値名解決も同じ表から引ける
+        assert_eq!(edt_for_name(eoj, 0xA3, "vertical"), Some(0x41));
+        // 風向系はエアコン固有。他クラスでは未知 EPC 扱い
+        assert!(decode(Eoj([0x02, 0x63, 1]), 0xA3, &[0x31]).is_none());
+    }
+
+    #[test]
+    fn instant_power_is_common_to_all_classes() {
+        // 0x84 はスーパークラス共通 → クラス辞書が無い機器でもデコードできる
+        assert_eq!(
+            decode(Eoj([0x01, 0x30, 1]), 0x84, &[0x01, 0x2C]).unwrap()["instant_power_w"],
+            300
+        );
+        assert_eq!(
+            decode(Eoj([0x02, 0x63, 1]), 0x84, &[0x00, 0x00]).unwrap()["instant_power_w"],
+            0
+        );
+        // 2 バイト以外・範囲外 (0xFFFE/0xFFFF) は解釈しない
+        assert!(decode(Eoj([0x01, 0x30, 1]), 0x84, &[0x64]).is_none());
+        assert!(decode(Eoj([0x01, 0x30, 1]), 0x84, &[0xFF, 0xFE]).is_none());
     }
 
     #[test]

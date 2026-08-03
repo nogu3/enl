@@ -179,7 +179,7 @@ task docker:test   # tests inside Docker (no toolchain needed)
 
 The core (discover / get / set / describe) is verified against real devices.
 
-- [x] Expanded decode dictionary — `82` spec version, `8A` manufacturer code (major vendors named, unknown ones left as hex), electric shutter `0263`, home AC `0130`. Unknown EPCs still return raw hex.
+- [x] Expanded decode dictionary — `82` spec version, `84` instantaneous power draw, `8A` manufacturer code (major vendors named, unknown ones left as hex), electric shutter `0263`, home AC `0130` (mode, setpoint, room/outdoor temperature, humidity, air flow, swing). Unknown EPCs and out-of-range values still return raw hex.
 - [x] `raw` subcommand — send arbitrary ESV/EPC/EDT, return raw response hex.
 - [x] Output schema stabilization — each subcommand's stdout JSON Schema is published via the `schema` subcommand and machine-fetchable, so LLMs / `jq` can pin to it across versions.
 
