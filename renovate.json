@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "timezone": "Asia/Tokyo",
+  "schedule": ["before 9am on monday"],
+  "osvVulnerabilityAlerts": true,
+  "platformAutomerge": false,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 9am on monday"],
+    "automerge": true
+  },
+  "packageRules": [
+    {
+      "description": "major 以外はまとめて 1 本・CI が通れば自動マージ（Renovate が CI 結果を見てから merge する。CI が無いリポでは PR のまま残る）",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "non-major dependencies",
+      "automerge": true
+    }
+  ]
+}
